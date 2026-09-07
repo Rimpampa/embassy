@@ -18,7 +18,6 @@ use embassy_time_driver::{Driver, TICK_HZ};
 use embassy_time_queue_utils::Queue;
 
 use crate::afec;
-use defmt::debug;
 
 pub static INTERRUPT_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -132,7 +131,6 @@ fn set_lptim0_clock_source() -> Result<(), rcc::Error> {
 
 impl LptimTimeDriver {
     fn init(&'static self) {
-        debug!("lptim0 init");
         assert!(TICK_HZ == TIMER_TICK_HZ, "embassy-asr: time tick rate must be 32768 Hz");
 
         // XO32K is in the always-on domain. Clear its AFEC power-down bits
