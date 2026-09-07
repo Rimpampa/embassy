@@ -18,7 +18,7 @@ pub mod pac {
 }
 
 #[cfg(any(feature = "time-driver-rtc", feature = "time-driver-lptim0"))]
-mod time_driver;
+pub mod time_driver;
 
 #[cfg(feature = "asr6601")]
 pub mod afec;
@@ -273,4 +273,9 @@ pub fn init(config: Config) -> Peripherals {
     }
 
     peripherals
+}
+
+#[cfg(any(feature = "time-driver-rtc", feature = "time-driver-lptim0"))]
+pub fn time_driver_interrupt_count() -> u32 {
+    crate::time_driver::interrupt_count()
 }

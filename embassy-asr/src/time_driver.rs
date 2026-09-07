@@ -18,6 +18,12 @@ use embassy_time_driver::{Driver, TICK_HZ};
 use embassy_time_queue_utils::Queue;
 
 use crate::afec;
+
+pub static INTERRUPT_COUNT: AtomicU32 = AtomicU32::new(0);
+
+pub fn interrupt_count() -> u32 {
+    INTERRUPT_COUNT.load(Ordering::Relaxed)
+}
 use crate::pac::{self, Interrupt, interrupt};
 use crate::rcc::{self, Peripheral as RccPeripheral};
 
@@ -261,6 +267,7 @@ impl LptimTimeDriver {
     }
 
     fn on_interrupt(&self) {
+        INTERRUPT_COUNT.fetch_add(1, Ordering::Relaxed);
         let isr = lptim().isr().read().bits();
         let ier = lptim().ier().read().bits();
         let pending = isr & ier & (ISR_ARRM | ISR_CMPM);
