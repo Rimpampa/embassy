@@ -40,7 +40,6 @@ critical-section = "1.1"
 version = "0.1.0"
 git = "https://github.com/Rimpampa/ASR6601-PAC.git"
 branch = "svd"
-path = "../../ASR6601-PAC"
 optional = true
 features = ["critical-section", "rt"]
 
