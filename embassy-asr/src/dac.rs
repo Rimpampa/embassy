@@ -18,7 +18,6 @@
 
 use crate::afec::analog;
 use crate::gpio::Flex;
-use crate::pac::dac::cr::{MaskAmpSel, TrigSrcSel, TrigTypeSel, WaveSel};
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
 
@@ -195,52 +194,52 @@ impl<'d> Dac<'d> {
         self.trigger_source = config.trigger_source;
 
         let trig_src = match config.trigger_source {
-            TriggerSource::Gptimer1Trgo => Some(TrigSrcSel::Gptimer1Trgo),
-            TriggerSource::Gptimer0Trgo => Some(TrigSrcSel::Gptimer0Trgo),
-            TriggerSource::Bstimer1Trgo => Some(TrigSrcSel::Bstimer1Trgo),
-            TriggerSource::Bstimer0Trgo => Some(TrigSrcSel::Bstimer0Trgo),
-            TriggerSource::Gpio6 => Some(TrigSrcSel::Gpio6),
-            TriggerSource::Gpio24 => Some(TrigSrcSel::Gpio24),
-            TriggerSource::Gpio43 => Some(TrigSrcSel::Gpio43),
-            TriggerSource::Software => Some(TrigSrcSel::Software),
+            TriggerSource::Gptimer1Trgo => Some(0u8),
+            TriggerSource::Gptimer0Trgo => Some(1u8),
+            TriggerSource::Bstimer1Trgo => Some(2u8),
+            TriggerSource::Bstimer0Trgo => Some(3u8),
+            TriggerSource::Gpio6 => Some(4u8),
+            TriggerSource::Gpio24 => Some(5u8),
+            TriggerSource::Gpio43 => Some(6u8),
+            TriggerSource::Software => Some(7u8),
             TriggerSource::None => None,
         };
-        let trig_type = match config.trigger_type {
-            TriggerType::RisingEdge => TrigTypeSel::RisingEdge,
-            TriggerType::FallingEdge => TrigTypeSel::FallingEdge,
-            TriggerType::RisingFallingEdge => TrigTypeSel::RisingFallingEdge,
+        let trig_type: u8 = match config.trigger_type {
+            TriggerType::RisingEdge => 0,
+            TriggerType::FallingEdge => 1,
+            TriggerType::RisingFallingEdge => 2,
         };
-        let wave = match config.wave_type {
-            WaveType::None => WaveSel::None,
-            WaveType::Noise => WaveSel::Noise,
-            WaveType::Triangle => WaveSel::Triangle,
+        let wave: u8 = match config.wave_type {
+            WaveType::None => 0,
+            WaveType::Noise => 1,
+            WaveType::Triangle => 2,
         };
-        let level = match config.wave_level {
-            WaveLevel::Level1 => MaskAmpSel::Value1,
-            WaveLevel::Level3 => MaskAmpSel::Value3,
-            WaveLevel::Level7 => MaskAmpSel::Value7,
-            WaveLevel::Level15 => MaskAmpSel::Value15,
-            WaveLevel::Level31 => MaskAmpSel::Value31,
-            WaveLevel::Level63 => MaskAmpSel::Value63,
-            WaveLevel::Level127 => MaskAmpSel::Value127,
-            WaveLevel::Level255 => MaskAmpSel::Value255,
-            WaveLevel::Level511 => MaskAmpSel::Value511,
-            WaveLevel::Level1023 => MaskAmpSel::Value1023,
+        let level: u8 = match config.wave_level {
+            WaveLevel::Level1 => 0,
+            WaveLevel::Level3 => 1,
+            WaveLevel::Level7 => 2,
+            WaveLevel::Level15 => 3,
+            WaveLevel::Level31 => 4,
+            WaveLevel::Level63 => 5,
+            WaveLevel::Level127 => 6,
+            WaveLevel::Level255 => 7,
+            WaveLevel::Level511 => 8,
+            WaveLevel::Level1023 => 9,
         };
 
-        Self::regs().cr().modify(|_, w| {
+        Self::regs().cr().modify(|_, w| unsafe {
             match trig_src {
                 Some(src) => {
-                    w.trig_src_sel().variant(src);
+                    w.trig_src_sel().bits(src);
                     w.trig_en().set_bit();
                 }
                 None => {
                     w.trig_en().clear_bit();
                 }
             }
-            w.trig_type_sel().variant(trig_type);
-            w.wave_sel().variant(wave);
-            w.mask_amp_sel().variant(level);
+            w.trig_type_sel().bits(trig_type);
+            w.wave_sel().bits(wave);
+            w.mask_amp_sel().bits(level);
             w
         });
     }
@@ -328,8 +327,8 @@ impl<'d> Dac<'d> {
     /// Enable or disable a DAC interrupt source (`dac_config_interrupt`).
     pub fn set_interrupt_enabled(&mut self, interrupt: Interrupt, enabled: bool) {
         Self::regs().cr().modify(|_, w| match interrupt {
-            Interrupt::Underflow => w.intr_underflow_en().bit(enabled),
-            Interrupt::Empty => w.intr_empty_en().bit(enabled),
+            Interrupt::Underflow => w.underflow_en().bit(enabled),
+            Interrupt::Empty => w.empty_en().bit(enabled),
         });
     }
 

@@ -17,50 +17,50 @@ pub mod pac {
     }
 }
 
-#[cfg(feature = "time-driver-rtc")]
+#[cfg(any(feature = "time-driver-rtc", feature = "time-driver-lptim0"))]
 mod time_driver;
 
 #[cfg(feature = "asr6601")]
-pub mod adc;
-#[cfg(feature = "asr6601")]
 pub mod afec;
 #[cfg(feature = "asr6601")]
+pub mod adc;
+#[cfg(any())]
 pub mod bstimer;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod crc;
 #[cfg(feature = "asr6601")]
 pub mod dac;
 #[cfg(feature = "asr6601")]
 pub mod dma;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod flash;
 #[cfg(feature = "asr6601")]
 pub mod gpio;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod i2c;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod iwdg;
 #[cfg(feature = "asr6601")]
 pub mod lptimer;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod lpuart;
 #[cfg(feature = "asr6601")]
 pub mod pwr;
 #[cfg(feature = "asr6601")]
 pub mod rcc;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod rng;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod sec;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod spi;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod syscfg;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod timer;
 #[cfg(feature = "asr6601")]
 pub mod uart;
-#[cfg(feature = "asr6601")]
+#[cfg(any())]
 pub mod wdg;
 
 pub use embassy_hal_internal::{Peri, PeripheralType};
@@ -89,8 +89,8 @@ pub mod mode {
 
 #[cfg(feature = "asr6601")]
 embassy_hal_internal::interrupt_mod!(
-    SEC, RTC, WDG, EFC, UART3, I2C2, UART0, UART1, UART2, LPUART, SSP0, SSP1, QSPI, I2C0, I2C1, SCC, ADC, AFEC, SSP2,
-    DMA1, DAC, LORA, GPIO, TIMER0, TIMER1, TIMER2, TIMER3, BSTIMER0, BSTIMER1, LPTIMER0, SAC, DMA0, I2S, LCD, PWR,
+    SEC, RTC, WDG, EFC, UART3, UART0, UART1, UART2, LPUART, SSP0, SSP1, QSPI, I2C0, I2C1, ADC, AFEC, SSP2,
+    DMA1, DAC, LORA, GPIO, TIMER0, TIMER1, TIMER2, TIMER3, BSTIMER0, BSTIMER1, LPTIMER0, DMA0, I2S, LCD, PWR,
     LPTIMER1, IWDG,
 );
 
@@ -200,7 +200,6 @@ embassy_hal_internal::peripherals! {
     BSTIMER1,
     LPTIMER0,
     LPTIMER1,
-    #[cfg(not(feature = "time-driver-rtc"))]
     RTC,
 
     // Analog and display
@@ -246,8 +245,9 @@ impl Default for Config {
 
 /// Initialize the ASR HAL.
 ///
-/// With `time-driver-rtc` enabled, this resets and uses RTC exclusively for
-/// Embassy time. Applications must not access RTC through the raw PAC.
+/// With `time-driver-lptim0` enabled, this resets and uses LPTIM0 exclusively
+/// for Embassy time. Applications must not access LPTIM0 through the raw PAC.
+/// With `time-driver-rtc` (deprecated) the RTC is used instead.
 pub fn init(config: Config) -> Peripherals {
     let peripherals = Peripherals::take();
 
@@ -262,7 +262,7 @@ pub fn init(config: Config) -> Peripherals {
         }
     }
 
-    #[cfg(feature = "time-driver-rtc")]
+    #[cfg(any(feature = "time-driver-rtc", feature = "time-driver-lptim0"))]
     crate::time_driver::init();
 
     unsafe {

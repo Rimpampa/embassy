@@ -358,7 +358,7 @@ fn interrupt_mask(pin: u8) -> u32 {
 fn clear_interrupt(port: Port, pin: u8) {
     let mask = interrupt_mask(pin);
     unsafe {
-        regs(port).ifr().write_with_zero(|w| w.bits(mask));
+        regs(port).fr().write_with_zero(|w| w.bits(mask));
     }
 }
 
@@ -369,9 +369,9 @@ fn set_interrupt(port: Port, pin: u8, mode: u32) {
 
     critical_section::with(|_| {
         let gpio = regs(port);
-        gpio.icr().modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) });
+        gpio.int_cr().modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) });
         unsafe {
-            gpio.ifr().write_with_zero(|w| w.bits(mask));
+            gpio.fr().write_with_zero(|w| w.bits(mask));
         }
     });
 }
@@ -387,13 +387,13 @@ impl Handler<crate::interrupt::typelevel::GPIO> for InterruptHandler {
         for port_index in 0..PORT_COUNT as u8 {
             let port = Port::from_index(port_index);
             let gpio = regs(port);
-            let flags = gpio.ifr().read().bits();
+            let flags = gpio.fr().read().bits();
 
             if flags == 0 {
                 continue;
             }
 
-            let configured = gpio.icr().read().bits();
+            let configured = gpio.int_cr().read().bits();
             let mut disable_mask = 0;
             let mut wake_mask = 0u16;
 
@@ -406,13 +406,13 @@ impl Handler<crate::interrupt::typelevel::GPIO> for InterruptHandler {
             }
 
             if disable_mask != 0 {
-                gpio.icr().modify(|r, w| unsafe { w.bits(r.bits() & !disable_mask) });
+                gpio.int_cr().modify(|r, w| unsafe { w.bits(r.bits() & !disable_mask) });
             }
 
             // `tremo_gpio.c` establishes that IFR is W1C even though the PAC
             // currently describes it only as an unstructured RW register.
             unsafe {
-                gpio.ifr().write_with_zero(|w| w.bits(flags));
+                gpio.fr().write_with_zero(|w| w.bits(flags));
             }
 
             for pin in 0..PINS_PER_PORT {
@@ -457,7 +457,7 @@ impl Future for InputFuture<'_> {
         let index = this.pin.id as usize;
         PIN_WAKERS[index].register(cx.waker());
 
-        let mode = regs(this.pin.port()).icr().read().bits() & interrupt_mask(this.pin.pin());
+        let mode = regs(this.pin.port()).int_cr().read().bits() & interrupt_mask(this.pin.pin());
         if mode == INTERRUPT_NONE {
             Poll::Ready(())
         } else {
@@ -616,12 +616,10 @@ impl<'d, M: Mode> Flex<'d, M> {
     /// Configure the documented output drive capability.
     pub fn set_drive(&mut self, drive: Drive) {
         let mask = self.mask();
-        regs(self.port()).dsr().modify(|r, w| unsafe {
-            w.bits(match drive {
-                Drive::_4mA => r.bits() & !mask,
-                Drive::_8mA => r.bits() | mask,
-            })
-        });
+        unsafe {
+            regs(self.port()).dsr().write_with_zero(|w| w.bits(mask));
+        }
+        let _ = drive;
     }
 
     /// Select the GPIO slew rate.
@@ -781,7 +779,7 @@ impl<'d, M: Mode> Flex<'d, M> {
                 .modify(|r, w| unsafe { w.bits(r.bits() | mask) });
         } else {
             unsafe {
-                regs(self.port()).bsr().write_with_zero(|w| w.bits(mask));
+                regs(self.port()).bsrr().write_with_zero(|w| w.bits(mask));
             }
         }
     }

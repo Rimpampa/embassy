@@ -352,7 +352,7 @@ fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool)
     let regs = info.regs();
 
     // Disable UART and flush FIFOs by clearing FEN, matching `uart_init`.
-    regs.cr().modify(|_, w| w.uart_en().clear_bit());
+    regs.cr().modify(|_, w| w.uarten().clear_bit());
     regs.lcr_h().modify(|_, w| w.fen().clear_bit());
     unsafe {
         regs.imsc().write_with_zero(|w| w.bits(0));
@@ -360,20 +360,20 @@ fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool)
         regs.fbrd().write_with_zero(|w| w.bits(fbrd));
     }
 
-    let wlen = match config.data_bits {
-        DataBits::DataBits5 => pac::uart0::lcr_h::Wlen::Value5,
-        DataBits::DataBits6 => pac::uart0::lcr_h::Wlen::Value6,
-        DataBits::DataBits7 => pac::uart0::lcr_h::Wlen::Value7,
-        DataBits::DataBits8 => pac::uart0::lcr_h::Wlen::Value8,
+    let wlen: u8 = match config.data_bits {
+        DataBits::DataBits5 => 0,
+        DataBits::DataBits6 => 1,
+        DataBits::DataBits7 => 2,
+        DataBits::DataBits8 => 3,
     };
-    let stop = match config.stop_bits {
-        StopBits::STOP1 => pac::uart0::lcr_h::Stop::Value1,
-        StopBits::STOP2 => pac::uart0::lcr_h::Stop::Value2,
+    let stp2 = match config.stop_bits {
+        StopBits::STOP1 => false,
+        StopBits::STOP2 => true,
     };
 
-    regs.lcr_h().modify(|_, w| {
-        w.wlen().variant(wlen);
-        w.stop().variant(stop);
+    regs.lcr_h().modify(|_, w| unsafe {
+        w.wlen().bits(wlen);
+        w.stp2().bit(stp2);
         w.fen().bit(config.fifo);
         match config.parity {
             Parity::None => {
@@ -381,43 +381,45 @@ fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool)
             }
             Parity::Odd => {
                 w.pen().set_bit();
-                w.eps_even().clear_bit();
+                w.eps().clear_bit();
             }
             Parity::Even => {
                 w.pen().set_bit();
-                w.eps_even().set_bit();
+                w.eps().set_bit();
             }
         }
         w
     });
 
-    let mode = match (has_rx, has_tx) {
-        (true, true) => pac::uart0::cr::UartMode::Txrx,
-        (true, false) => pac::uart0::cr::UartMode::Rx,
-        (false, true) => pac::uart0::cr::UartMode::Tx,
+    let (txe, rxe) = match (has_rx, has_tx) {
+        (true, true) => (true, true),
+        (true, false) => (false, true),
+        (false, true) => (true, false),
         (false, false) => return Err(ConfigError::NoRxOrTx),
     };
-    let flow = match config.flow_control {
-        FlowControl::None => pac::uart0::cr::FlowCtrl::None,
-        FlowControl::Rts => pac::uart0::cr::FlowCtrl::Rts,
-        FlowControl::Cts => pac::uart0::cr::FlowCtrl::Cts,
-        FlowControl::RtsCts => pac::uart0::cr::FlowCtrl::CtsRts,
+    let (rtsen, ctsen) = match config.flow_control {
+        FlowControl::None => (false, false),
+        FlowControl::Rts => (true, false),
+        FlowControl::Cts => (false, true),
+        FlowControl::RtsCts => (true, true),
     };
 
     regs.cr().modify(|_, w| {
-        w.uart_mode().variant(mode);
-        w.flow_ctrl().variant(flow);
+        w.txe().bit(txe);
+        w.rxe().bit(rxe);
+        w.rtsen().bit(rtsen);
+        w.ctsen().bit(ctsen);
         w
     });
 
     // Prefer a low TX interrupt threshold so TX wakes soon when space appears.
-    regs.ifls().modify(|_, w| {
-        w.tx().variant(pac::uart0::ifls::Tx::Value1_8);
-        w.rx().variant(pac::uart0::ifls::Rx::Value1_8);
+    regs.ifls().modify(|_, w| unsafe {
+        w.txiflsel().bits(0);
+        w.rxiflsel().bits(0);
         w
     });
 
-    regs.cr().modify(|_, w| w.uart_en().set_bit());
+    regs.cr().modify(|_, w| w.uarten().set_bit());
     Ok(())
 }
 
@@ -429,7 +431,7 @@ fn enable_clock(info: &'static Info) -> Result<(), ConfigError> {
 
 fn shutdown(info: &'static Info) {
     let regs = info.regs();
-    regs.cr().modify(|_, w| w.uart_en().clear_bit());
+    regs.cr().modify(|_, w| w.uarten().clear_bit());
     unsafe {
         regs.imsc().write_with_zero(|w| w.bits(0));
         regs.dmacr().write_with_zero(|w| w.bits(0));
@@ -443,10 +445,10 @@ fn flag(regs: &RegisterBlock, mask: u32) -> bool {
 
 fn read_dr(regs: &RegisterBlock) -> Result<u8, Error> {
     let value = regs.dr().read().bits();
-    // Writing RSC_ECR clears sticky receive-status bits (PL011 / SDK).
+    // Writing RSR_ECR clears sticky receive-status bits (PL011 / SDK).
     if value & DR_ERROR_MASK != 0 {
         unsafe {
-            regs.rsc_ecr().write_with_zero(|w| w.bits(0));
+            regs.rsr_ecr().write_with_zero(|w| w.bits(0));
         }
     }
     decode_dr_error(value)
@@ -471,7 +473,7 @@ fn set_dma_req(regs: &RegisterBlock, tx: bool, enable: bool) {
         if tx {
             w.tx_en().bit(enable);
         } else {
-            w.rx_en().bit(enable);
+            w.rxdmae().bit(enable);
         }
         w
     });

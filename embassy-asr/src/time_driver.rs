@@ -1,10 +1,15 @@
-//! `embassy-time` driver using the ASR6601 RTC.
+//! `embassy-time` driver using the ASR6601 LPTIM0.
 //!
-//! This follows the vendor LoRa timer implementation: the always-on calendar is
-//! the monotonic clock and the cyclic counter provides one-shot wakeups.
+//! This follows the STM32 LPTIM time-driver pattern adapted to the ASR6601
+//! vendor `tremo_lptimer` programming model:
+//! * LPTIM0 is clocked from the always-on XO32K at 32_768 Hz
+//! * The 16-bit counter free-runs with ARR = 0xFFFF and its overflow (ARRM)
+//!   extends the counter to 64 bit
+//! * CMP provides one-shot wakeups. Far-future alarms are deferred until
+//!   the overflow period brings them within half the counter range.
 
 use core::cell::{Cell, RefCell};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::Waker;
 
 use critical_section::{CriticalSection, Mutex};
@@ -17,228 +22,276 @@ use crate::pac::{self, Interrupt, interrupt};
 use crate::rcc::{self, Peripheral as RccPeripheral};
 
 const TIMER_TICK_HZ: u64 = 32_768;
-const MIN_ALARM_TICKS: u64 = 164; // Five milliseconds, as required by the vendor timer.
+const ARR_MAX: u16 = 0xFFFF;
 
-const RTC_SYNC_READY: u32 = 0x0dff;
-const RTC_CALENDAR_ENABLE: u32 = 1 << 28;
-const RTC_CYC_WAKE_ENABLE: u32 = 1 << 25;
-const RTC_CYC_ENABLE: u32 = 1 << 24;
-const RTC_CYC_INTERRUPT: u32 = 1 << 4;
-const RTC_CYC_STATUS: u32 = 1 << 4;
+// LPTIM0 register bit definitions (vendor tremo_lptimer.h / RM)
+const ISR_CMPM: u32 = 1 << 0;
+const ISR_ARRM: u32 = 1 << 1;
+const ISR_CMPOK: u32 = 1 << 3;
+const ISR_ARROK: u32 = 1 << 4;
+const ISR_CFGROK: u32 = 1 << 7;
+const ISR_CROK: u32 = 1 << 8;
 
-// AFEC analog register 0x02 bits 13/14 power-gate XO32K. Clearing them matches
-// `rcc_enable_oscillator(RCC_OSC_XO32K)`.
+const IER_ARRM: u32 = 1 << 1;
+const IER_CMPM: u32 = 1 << 0;
+
+const ICR_ARRM: u32 = 1 << 1;
+const ICR_CMPM: u32 = 1 << 0;
+
+const CSR_ARRM: u32 = 1 << 1;
+const CSR_CMPM: u32 = 1 << 0;
+
+const CR_ENABLE: u32 = 1 << 0;
+const CR_SNGSTRT: u32 = 1 << 1;
+const CR_CNTSTRT: u32 = 1 << 2;
+
+const CFGR_PRESC_MASK: u32 = 0xe00;
+
+// Analog XO32K power-down bits (AFEC REG_02 bits 13/14)
 const ANALOG_XO32K_POWER_DOWN: u32 = (1 << 13) | (1 << 14);
 
-struct AsrTimeDriver {
+const POLL_LIMIT: u32 = 1_000_000;
+
+// If the alarm is more than ~75% of the 16-bit range in the future we
+// defer enabling the compare interrupt until the next overflow. This avoids
+// aliasing where the 16-bit compare value shadows an earlier period.
+const COMPARE_THRESHOLD: u64 = 0xc000;
+
+struct LptimTimeDriver {
     initialized: AtomicBool,
+    period: AtomicU32,
     alarm: Mutex<Cell<u64>>,
     queue: Mutex<RefCell<Queue>>,
 }
 
-embassy_time_driver::time_driver_impl!(static DRIVER: AsrTimeDriver = AsrTimeDriver {
+embassy_time_driver::time_driver_impl!(static DRIVER: LptimTimeDriver = LptimTimeDriver {
     initialized: AtomicBool::new(false),
+    period: AtomicU32::new(0),
     alarm: Mutex::new(Cell::new(u64::MAX)),
     queue: Mutex::new(RefCell::new(Queue::new())),
 });
 
-fn rtc() -> pac::Rtc {
-    unsafe { pac::Rtc::steal() }
+fn lptim() -> pac::Lptimer0 {
+    unsafe { pac::Lptimer0::steal() }
 }
 
-fn sync_ready() -> bool {
-    rtc().sr1().read().bits() & RTC_SYNC_READY == RTC_SYNC_READY
-}
-
-fn wait_sync() {
-    while !sync_ready() {}
-}
-
-fn read_stable(register: impl Fn(&pac::Rtc) -> u32) -> u32 {
-    loop {
-        let first = register(&rtc());
-        if first == register(&rtc()) {
-            return first;
+fn wait_isr(mask: u32) {
+    for _ in 0..POLL_LIMIT {
+        if lptim().isr().read().bits() & mask == mask {
+            return;
         }
+        core::hint::spin_loop();
     }
 }
 
-fn is_leap_year(year: u32) -> bool {
-    year % 4 == 0
-}
-
-fn calendar_ticks(time: u32, date: u32, subsecond: u32) -> u64 {
-    let second = (time & 0x0f) + ((time >> 4) & 0x07) * 10;
-    let minute = ((time >> 7) & 0x0f) + ((time >> 11) & 0x07) * 10;
-    let hour = ((time >> 14) & 0x0f) + ((time >> 18) & 0x03) * 10;
-
-    let day = (date & 0x0f) + ((date >> 4) & 0x03) * 10;
-    let month = ((date >> 6) & 0x0f) + ((date >> 10) & 0x01) * 10;
-    let year = 2000 + ((date >> 14) & 0x0f) + ((date >> 18) & 0x0f) * 10;
-
-    const DAYS_BEFORE_MONTH: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-
-    let years = year.saturating_sub(2000);
-    let mut days = years * 365 + (years + 3) / 4;
-    if (1..=12).contains(&month) {
-        days += DAYS_BEFORE_MONTH[(month - 1) as usize];
-        if month > 2 && is_leap_year(year) {
-            days += 1;
+fn wait_csr(mask: u32) {
+    for _ in 0..POLL_LIMIT {
+        if lptim().csr().read().bits() & mask == mask {
+            return;
         }
-    }
-    days += day.saturating_sub(1);
-
-    let seconds = days as u64 * 86_400 + hour as u64 * 3_600 + minute as u64 * 60 + second as u64;
-    seconds * TIMER_TICK_HZ + subsecond as u64
-}
-
-fn read_calendar_ticks() -> u64 {
-    loop {
-        let subsecond = rtc().sub_second_cnt().read().bits();
-        let time = read_stable(|rtc| rtc.calendar_r().read().bits());
-        let date = read_stable(|rtc| rtc.calendar_r_h().read().bits());
-
-        // Retry across a subsecond wrap so the calendar and fractional part
-        // always describe the same instant.
-        if subsecond != 0 && subsecond == rtc().sub_second_cnt().read().bits() {
-            return calendar_ticks(time, date, subsecond);
-        }
+        core::hint::spin_loop();
     }
 }
 
-impl AsrTimeDriver {
+fn set_lptim0_clock_source() -> Result<(), rcc::Error> {
+    // Vendor sequence: gate functional clock, wait for sync clear, then
+    // program CR1. Mirrors `tremo_lptimer` and `rcc_set_lptimer0_clk_source`.
+    let sync = || unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set();
+    if sync() {
+        critical_section::with(|_| {
+            unsafe { pac::Rcc::steal() }
+                .cgr1()
+                .modify(|_, w| w.lptim0_clk_en().clear_bit());
+        });
+        for _ in 0..POLL_LIMIT {
+            if !sync() {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if sync() {
+            return Err(rcc::Error::Timeout(rcc::WaitTarget::ClockDomain));
+        }
+    }
+    critical_section::with(|_| {
+        let rcc = unsafe { pac::Rcc::steal() };
+        rcc.cr1().modify(|_, w| unsafe {
+            w.lptim0_ext_clk_sel().clear_bit();
+            w.lptim0_clk_sel().bits(2) // 2 = XO32K per tremo_regs.h
+        });
+    });
+    Ok(())
+}
+
+impl LptimTimeDriver {
     fn init(&'static self) {
         assert!(TICK_HZ == TIMER_TICK_HZ, "embassy-asr: time tick rate must be 32768 Hz");
 
-        // Shared AFEC analog helper also gates the AFEC clock.
+        // XO32K is in the always-on domain. Clear its AFEC power-down bits
+        // (matches vendor `rcc_enable_oscillator(RCC_OSC_XO32K)`).
         afec::analog::REG_02.clear_bits(ANALOG_XO32K_POWER_DOWN);
 
-        // Reinitialize RTC and select XO32K while its functional clock is off.
-        // Clock/reset helpers match `rcc_enable_peripheral_clk` / reset sequencing,
-        // including the vendor 92 µs asynchronous-domain delay after reset release.
-        rcc::disable_peripheral(RccPeripheral::Rtc).expect("embassy-asr: failed to disable RTC clock");
-        rcc::reset_peripheral(RccPeripheral::Rtc).expect("embassy-asr: failed to reset RTC");
+        // Gate, reset, select XO32K, re-enable. This mirrors the SDK
+        // `rcc_enable_peripheral_clk` / `rcc_rst_peripheral` sequence and the
+        // vendor 92 µs async delay after reset release.
+        let _ = rcc::disable_peripheral(RccPeripheral::Lptimer0);
+        let _ = rcc::reset_peripheral(RccPeripheral::Lptimer0);
+        let _ = set_lptim0_clock_source();
+        rcc::enable_peripheral(RccPeripheral::Lptimer0).expect("embassy-asr: failed to enable LPTIM0 clock");
 
-        unsafe { pac::Rcc::steal() }
-            .cr1()
-            .modify(|_, w| w.rtc_clk_sel().xo32k());
+        // Configure LPTIM0: continuous, prescaler /1, no preload/wave, max ARR
+        wait_isr(ISR_CFGROK);
+        // COUNTMODE = 0 (internal), PRESC = 0 (/1), PRELOAD = 0, WAVPOL = 0
+        lptim().cfgr().modify(|r, w| unsafe {
+            let mut bits = r.bits() & !0x800000u32; // COUNTMODE
+            bits &= !CFGR_PRESC_MASK;
+            bits &= !0x400000u32; // PRELOAD
+            bits &= !0x200000u32; // WAVPOL
+            w.bits(bits)
+        });
+        wait_isr(ISR_CFGROK);
 
-        rcc::enable_peripheral(RccPeripheral::Rtc).expect("embassy-asr: failed to enable RTC clock");
+        // Enable peripheral and wait for CROK
+        lptim().cr().modify(|_, w| unsafe { w.bits(CR_ENABLE) });
+        wait_isr(ISR_CROK);
 
-        wait_sync();
-        unsafe {
-            rtc().ctrl().write_with_zero(|w| w.bits(0));
-            rtc().cr1().write_with_zero(|w| w.bits(0));
-            rtc().sr().write_with_zero(|w| w.bits(0x7f));
+        // ARR = max, wait for ARROK
+        unsafe { lptim().arr().write_with_zero(|w| w.bits(ARR_MAX as u32)) };
+        wait_isr(ISR_ARROK);
 
-            // Epoch: Saturday 2000-01-01 00:00:00.
-            rtc().calendar().write_with_zero(|w| w.bits(0));
-            rtc().calendar_h().write_with_zero(|w| w.bits((6 << 11) | (1 << 6) | 1));
-        }
-        wait_sync();
-        rtc()
-            .ctrl()
-            .modify(|r, w| unsafe { w.bits(r.bits() | RTC_CALENDAR_ENABLE) });
-        wait_sync();
+        // Ensure CMP is 0 and CMPOK
+        unsafe { lptim().cmp().write_with_zero(|w| w.bits(0)) };
+        wait_isr(ISR_CMPOK);
 
+        // Clear any pending flags via ICR + CSR wait
+        unsafe { lptim().icr().write_with_zero(|w| w.bits(ICR_ARRM | ICR_CMPM)) };
+        wait_csr(CSR_ARRM | CSR_CMPM);
+
+        // Enable overflow interrupt
+        lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_ARRM) });
+
+        // Start continuous counting
+        lptim().cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_CNTSTRT) });
+        wait_isr(ISR_CROK);
+
+        self.period.store(0, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
-        Interrupt::RTC.unpend();
-        Interrupt::RTC.set_priority(Priority::P2);
-        unsafe { Interrupt::RTC.enable() };
+
+        Interrupt::LPTIMER0.unpend();
+        Interrupt::LPTIMER0.set_priority(Priority::P2);
+        unsafe { Interrupt::LPTIMER0.enable() };
     }
 
-    /// Disable the cyclic counter and its interrupt. Caller must ensure RTC
-    /// register writes are allowed (`wait_sync` / `sync_ready`).
-    fn disable_cyc(&self) {
-        rtc()
-            .ctrl()
-            .modify(|r, w| unsafe { w.bits(r.bits() & !RTC_CYC_ENABLE) });
-        rtc()
-            .cr1()
-            .modify(|r, w| unsafe { w.bits(r.bits() & !RTC_CYC_INTERRUPT) });
-    }
-
-    fn stop_alarm(&self) {
-        wait_sync();
-        self.disable_cyc();
-    }
-
-    fn on_interrupt(&self) {
-        // RTC registers cross an asynchronous clock domain. Avoid spinning in
-        // interrupt context; an uncleared level source will retrigger once the
-        // synchronized status is readable.
-        if !sync_ready() {
-            return;
-        }
-
-        if rtc().sr().read().bits() & RTC_CYC_STATUS == 0 {
-            return;
-        }
-
-        // Already synchronized above; avoid a second wait before disable.
-        self.disable_cyc();
-        // Clearing status requires a sync after the control-register writes.
-        wait_sync();
-        unsafe {
-            rtc().sr().write_with_zero(|w| w.bits(RTC_CYC_STATUS));
-        }
-
-        critical_section::with(|cs| self.trigger_alarm(cs));
-    }
-
-    fn trigger_alarm(&self, cs: CriticalSection) {
-        let mut next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now());
-        while !self.set_alarm(cs, next) {
-            next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now());
-        }
+    fn now_inner(&self) -> u64 {
+        // Must be called with interrupts masked (critical_section) to avoid
+        // tearing between `period` and `cnt` across an overflow.
+        let period = self.period.load(Ordering::Relaxed);
+        let cnt = lptim().cnt().read().bits() as u16 as u64;
+        // If ARRM is pending, the counter has wrapped but `period` has not yet
+        // been incremented by the ISR. Account for it here.
+        let pending_overflow = if lptim().isr().read().bits() & ISR_ARRM != 0 { 1 } else { 0 };
+        ((period as u64 + pending_overflow as u64) << 16) | cnt
     }
 
     fn set_alarm(&self, cs: CriticalSection, timestamp: u64) -> bool {
-        self.stop_alarm();
         self.alarm.borrow(cs).set(timestamp);
 
         if timestamp == u64::MAX {
+            // No alarm: disable compare interrupt
+            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
             return true;
         }
 
-        let now = self.now();
+        let now = self.now_inner();
         if timestamp <= now {
+            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
             self.alarm.borrow(cs).set(u64::MAX);
             return false;
         }
 
-        let duration = (timestamp - now).clamp(MIN_ALARM_TICKS, u32::MAX as u64) as u32;
+        let cmp = (timestamp & 0xFFFF) as u16 as u32;
+        unsafe { lptim().cmp().write_with_zero(|w| w.bits(cmp)) };
+        wait_isr(ISR_CMPOK);
 
-        wait_sync();
-        unsafe {
-            rtc().cyc_max().write_with_zero(|w| w.bits(duration));
-            rtc().sr().write_with_zero(|w| w.bits(RTC_CYC_STATUS));
+        // Only enable CMPM if the alarm is near enough to avoid aliasing.
+        let diff = timestamp - now;
+        if diff < COMPARE_THRESHOLD {
+            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_CMPM) });
+        } else {
+            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
         }
-        wait_sync();
-        rtc()
-            .ctrl()
-            .modify(|r, w| unsafe { w.bits(r.bits() | RTC_CYC_WAKE_ENABLE | RTC_CYC_ENABLE) });
-        rtc()
-            .cr1()
-            .modify(|r, w| unsafe { w.bits(r.bits() | RTC_CYC_INTERRUPT) });
 
-        if timestamp <= self.now() {
-            self.stop_alarm();
+        // Re-check after programming in case time has advanced.
+        let now2 = self.now_inner();
+        if timestamp <= now2 {
+            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
             self.alarm.borrow(cs).set(u64::MAX);
             return false;
         }
 
         true
     }
+
+    fn next_period(&self) {
+        let period = self.period.load(Ordering::Relaxed) + 1;
+        self.period.store(period, Ordering::Release);
+        let t = (period as u64) << 16;
+
+        critical_section::with(|cs| {
+            let alarm = self.alarm.borrow(cs).get();
+            if alarm != u64::MAX {
+                let diff = alarm.saturating_sub(t);
+                if diff < COMPARE_THRESHOLD {
+                    // Alarm is now within range, enable compare
+                    lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_CMPM) });
+                }
+            }
+        });
+    }
+
+    fn trigger_alarm(&self, cs: CriticalSection) {
+        // Disable compare interrupt until next alarm is programmed
+        lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
+        self.alarm.borrow(cs).set(u64::MAX);
+
+        let mut next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now_inner());
+        while !self.set_alarm(cs, next) {
+            next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now_inner());
+        }
+    }
+
+    fn on_interrupt(&self) {
+        let isr = lptim().isr().read().bits();
+        let ier = lptim().ier().read().bits();
+        let pending = isr & ier & (ISR_ARRM | ISR_CMPM);
+        if pending == 0 {
+            return;
+        }
+
+        // Clear via ICR and wait for CSR ack where applicable
+        unsafe { lptim().icr().write_with_zero(|w| w.bits(pending & (ICR_ARRM | ICR_CMPM))) };
+        let csr_mask = (if pending & ISR_ARRM != 0 { CSR_ARRM } else { 0 })
+            | (if pending & ISR_CMPM != 0 { CSR_CMPM } else { 0 });
+        if csr_mask != 0 {
+            wait_csr(csr_mask);
+        }
+
+        if pending & ISR_ARRM != 0 {
+            self.next_period();
+        }
+        if pending & ISR_CMPM != 0 {
+            critical_section::with(|cs| self.trigger_alarm(cs));
+        }
+    }
 }
 
-impl Driver for AsrTimeDriver {
+impl Driver for LptimTimeDriver {
     fn now(&self) -> u64 {
-        if self.initialized.load(Ordering::Acquire) {
-            read_calendar_ticks()
-        } else {
-            0
+        if !self.initialized.load(Ordering::Acquire) {
+            return 0;
         }
+        // Mask interrupts to get atomic snapshot of period + cnt + pending ARRM
+        critical_section::with(|_| self.now_inner())
     }
 
     fn schedule_wake(&self, at: u64, waker: &Waker) {
@@ -259,68 +312,6 @@ pub(crate) fn init() {
 }
 
 #[interrupt]
-fn RTC() {
+fn LPTIMER0() {
     DRIVER.on_interrupt();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pack BCD calendar date fields the same way the driver writes `calendar_h`.
-    fn pack_date(year: u32, month: u32, day: u32, weekday: u32) -> u32 {
-        let y = year - 2000;
-        let y_ones = y % 10;
-        let y_tens = y / 10;
-        let m_ones = month % 10;
-        let m_tens = month / 10;
-        let d_ones = day % 10;
-        let d_tens = day / 10;
-        d_ones | (d_tens << 4) | (m_ones << 6) | (m_tens << 10) | (weekday << 11) | (y_ones << 14) | (y_tens << 18)
-    }
-
-    fn pack_time(hour: u32, minute: u32, second: u32) -> u32 {
-        let s_ones = second % 10;
-        let s_tens = second / 10;
-        let m_ones = minute % 10;
-        let m_tens = minute / 10;
-        let h_ones = hour % 10;
-        let h_tens = hour / 10;
-        s_ones | (s_tens << 4) | (m_ones << 7) | (m_tens << 11) | (h_ones << 14) | (h_tens << 18)
-    }
-
-    #[test]
-    fn epoch_is_zero() {
-        let date = pack_date(2000, 1, 1, 6);
-        assert_eq!(calendar_ticks(0, date, 0), 0);
-        assert_eq!(date, (6 << 11) | (1 << 6) | 1);
-    }
-
-    #[test]
-    fn one_second_and_subsecond() {
-        let date = pack_date(2000, 1, 1, 6);
-        let time = pack_time(0, 0, 1);
-        assert_eq!(calendar_ticks(time, date, 0), TIMER_TICK_HZ);
-        assert_eq!(calendar_ticks(0, date, 100), 100);
-    }
-
-    #[test]
-    fn leap_day_2000() {
-        let jan1 = pack_date(2000, 1, 1, 6);
-        let mar1 = pack_date(2000, 3, 1, 3);
-        let jan1_ticks = calendar_ticks(0, jan1, 0);
-        let mar1_ticks = calendar_ticks(0, mar1, 0);
-        // 2000 is a leap year in the RTC's simplified %4 rule: 31 + 29 days.
-        assert_eq!(mar1_ticks - jan1_ticks, 60 * 86_400 * TIMER_TICK_HZ);
-    }
-
-    #[test]
-    fn non_leap_feb_2001() {
-        let jan1 = pack_date(2001, 1, 1, 1);
-        let mar1 = pack_date(2001, 3, 1, 4);
-        assert_eq!(
-            calendar_ticks(0, mar1, 0) - calendar_ticks(0, jan1, 0),
-            59 * 86_400 * TIMER_TICK_HZ
-        );
-    }
 }

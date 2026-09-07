@@ -114,9 +114,9 @@ impl Handler<interrupt::typelevel::ADC> for InterruptHandler {
         if isr.eoc().bit_is_set() || isr.eos().bit_is_set() {
             // Mask further IRQs; the waiter re-enables as needed.
             regs.ier().modify(|_, w| {
-                w.eoc().clear_bit();
-                w.eos().clear_bit();
-                w.overrun().clear_bit()
+                w.eoc_int_en().clear_bit();
+                w.eos_int_en().clear_bit();
+                w.overrun_int_en().clear_bit()
             });
             WAKER.wake();
         }
@@ -732,23 +732,23 @@ impl<'d> Adc<'d, Async> {
             WAKER.register(cx.waker());
             // Enable EOC (+ overrun) after registering to avoid lost wakes.
             regs.ier().modify(|_, w| {
-                w.eoc().set_bit();
-                w.overrun().set_bit()
+                w.eoc_int_en().set_bit();
+                w.overrun_int_en().set_bit()
             });
 
             if self.take_overrun() {
                 regs.ier().modify(|_, w| {
-                    w.eoc().clear_bit();
-                    w.eos().clear_bit();
-                    w.overrun().clear_bit()
+                    w.eoc_int_en().clear_bit();
+                    w.eos_int_en().clear_bit();
+                    w.overrun_int_en().clear_bit()
                 });
                 return Poll::Ready(Err(Error::Overrun));
             }
             if regs.isr().read().eoc().bit_is_set() {
                 regs.ier().modify(|_, w| {
-                    w.eoc().clear_bit();
-                    w.eos().clear_bit();
-                    w.overrun().clear_bit()
+                    w.eoc_int_en().clear_bit();
+                    w.eos_int_en().clear_bit();
+                    w.overrun_int_en().clear_bit()
                 });
                 return Poll::Ready(Ok(()));
             }
@@ -800,23 +800,23 @@ impl<'d, M: Mode> Drop for Adc<'d, M> {
 }
 
 fn set_adc_clock_source(source: ClockSource) {
-    let sel = match source {
-        ClockSource::Pclk1 => pac::rcc::cr2::AdcClkSel::Pclk1,
-        ClockSource::Sysclk => pac::rcc::cr2::AdcClkSel::Sysclk,
-        ClockSource::Pll => pac::rcc::cr2::AdcClkSel::Pll,
-        ClockSource::Rco48m => pac::rcc::cr2::AdcClkSel::Rco48m,
+    let sel: u8 = match source {
+        ClockSource::Pclk1 => 0,
+        ClockSource::Sysclk => 1,
+        ClockSource::Pll => 2,
+        ClockSource::Rco48m => 3,
     };
 
     critical_section::with(|_| {
         let rcc = unsafe { pac::Rcc::steal() };
         // Vendor `rcc_set_adc_clk_source`: gate off, wait sync, then select.
-        if rcc.sr1().read().adc_clk_en_sync().bit_is_set() {
-            rcc.cgr0().modify(|_, w| w.adc_clk_en().clear_bit());
-            while rcc.sr1().read().adc_clk_en_sync().bit_is_set() {
+        if rcc.sr1().read().adcctrl_clk_en_sync().bit_is_set() {
+            rcc.cgr0().modify(|_, w| w.adcctrl_clk_en().clear_bit());
+            while rcc.sr1().read().adcctrl_clk_en_sync().bit_is_set() {
                 core::hint::spin_loop();
             }
         }
-        rcc.cr2().modify(|_, w| w.adc_clk_sel().variant(sel));
+        rcc.cr2().modify(|_, w| unsafe { w.adcctrl_clk_sel().bits(sel) });
     });
 }
 

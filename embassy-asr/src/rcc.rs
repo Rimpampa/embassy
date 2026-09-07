@@ -432,7 +432,7 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
             set_peripheral_clock_raw(Peripheral::Lora, true, poll_limit)?;
 
             critical_section::with(|_| {
-                lorac().cr1().modify(|r, w| {
+                lorac().lorac_cr1().modify(|r, w| {
                     let mut value = r.bits();
                     if value & LORAC_CR1_NRESET == 0 {
                         value |= LORAC_CR1_NRESET;
@@ -447,13 +447,13 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
             });
 
             wait_until(poll_limit, WaitTarget::Xo32m, || {
-                lorac().sr().read().bits() & LORAC_SR_XO32M_READY != 0
+                lorac().lorac_sr().read().bits() & LORAC_SR_XO32M_READY != 0
             })
         }
         Oscillator::Rco4m => {
             REG_06.clear_bits(ANALOG_RCO4M_POWER_DOWN);
             wait_until(poll_limit, WaitTarget::Rco4m, || {
-                afec().raw_sr().read().rco4m_ready().bit_is_set()
+                afec().raw_sr().read().sr_rco4m_ready().bit_is_set()
             })
         }
     }

@@ -92,8 +92,8 @@ impl<'d> Afec<'d> {
         let status = Self::regs().raw_sr().read();
         RawStatus {
             rco24m_ready: status.rco24m_ready().bit_is_set(),
-            pll_unlocked: status.pll_unlock().bit_is_set(),
-            rco4m_ready: status.rco4m_ready().bit_is_set(),
+            pll_unlocked: status.sr_pll_unlock().bit_is_set(),
+            rco4m_ready: status.sr_rco4m_ready().bit_is_set(),
         }
     }
 

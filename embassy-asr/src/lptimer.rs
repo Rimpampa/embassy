@@ -373,7 +373,7 @@ impl sealed::Instance for peripherals::LPTIMER0 {
         unsafe { pac::Rcc::steal() }
             .sr1()
             .read()
-            .lptimer0_clk_en_sync()
+            .lptim0_clk_en_sync()
             .bit_is_set()
     }
 
@@ -381,7 +381,7 @@ impl sealed::Instance for peripherals::LPTIMER0 {
         critical_section::with(|_| {
             unsafe { pac::Rcc::steal() }
                 .cgr1()
-                .modify(|_, w| w.lptimer0_clk_en().bit(enable));
+                .modify(|_, w| w.lptim0_clk_en().bit(enable));
         });
     }
 
@@ -389,22 +389,22 @@ impl sealed::Instance for peripherals::LPTIMER0 {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.cr1().modify(|_, w| match source {
-                ClockSource::ExtClk => w.lptimer0_extclk_sel().set_bit(),
+                ClockSource::ExtClk => w.lptim0_ext_clk_sel().set_bit(),
                 ClockSource::Pclk0 => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().pclk0()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim0_clk_sel().bits(0) }
                 }
                 ClockSource::Rco4m => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().rco4m()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim0_clk_sel().bits(1) }
                 }
                 ClockSource::Xo32k => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().xo32k()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim0_clk_sel().bits(2) }
                 }
                 ClockSource::Rco32k => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().rco32k()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim0_clk_sel().bits(3) }
                 }
             });
         });
@@ -418,7 +418,7 @@ impl Instance for peripherals::LPTIMER0 {
 impl sealed::Instance for peripherals::LPTIMER1 {
     #[inline]
     fn regs() -> &'static pac::lptimer0::RegisterBlock {
-        unsafe { &*pac::Lptimer1::ptr() }
+        unsafe { &* (pac::Lptimer1::ptr() as *const pac::lptimer0::RegisterBlock) }
     }
 
     #[inline]
@@ -437,7 +437,7 @@ impl sealed::Instance for peripherals::LPTIMER1 {
         unsafe { pac::Rcc::steal() }
             .sr1()
             .read()
-            .lptimer1_clk_en_sync()
+            .lptim1_clk_en_sync()
             .bit_is_set()
     }
 
@@ -445,7 +445,7 @@ impl sealed::Instance for peripherals::LPTIMER1 {
         critical_section::with(|_| {
             unsafe { pac::Rcc::steal() }
                 .cgr1()
-                .modify(|_, w| w.lptimer1_clk_en().bit(enable));
+                .modify(|_, w| w.lptim1_clk_en().bit(enable));
         });
     }
 
@@ -453,22 +453,22 @@ impl sealed::Instance for peripherals::LPTIMER1 {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.cr1().modify(|_, w| match source {
-                ClockSource::ExtClk => w.lptimer1_extclk_sel().set_bit(),
+                ClockSource::ExtClk => w.lptim1_ext_clk_sel().set_bit(),
                 ClockSource::Pclk0 => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().pclk0()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim1_clk_sel().bits(0) }
                 }
                 ClockSource::Rco4m => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().rco4m()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim1_clk_sel().bits(1) }
                 }
                 ClockSource::Xo32k => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().xo32k()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim1_clk_sel().bits(2) }
                 }
                 ClockSource::Rco32k => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().rco32k()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    unsafe { w.lptim1_clk_sel().bits(3) }
                 }
             });
         });
@@ -554,42 +554,23 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     fn apply_init(&self, config: Config) -> Result<(), Error> {
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
 
-        self.regs().cfgr().modify(|_, w| {
-            if config.count_by_external {
-                w.countmode().set_bit()
-            } else {
-                w.countmode().clear_bit()
-            }
-        });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        self.modify_cfgr_bits(0x800000, if config.count_by_external { 0x800000 } else { 0 })?;
 
         self.modify_cfgr_bits(CFGR_PRESC_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_PRESC_MASK, config.prescaler as u32)?;
 
-        self.regs().cfgr().modify(|_, w| {
-            if config.autoreload_preload {
-                w.preload().set_bit()
-            } else {
-                w.preload().clear_bit()
-            }
-        });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        self.modify_cfgr_bits(0x400000, if config.autoreload_preload { 0x400000 } else { 0 })?;
 
-        self.regs().cfgr().modify(|_, w| {
-            if config.wavpol_inverted {
-                w.wavpol().set_bit()
-            } else {
-                w.wavpol().clear_bit()
-            }
-        });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        self.modify_cfgr_bits(0x200000, if config.wavpol_inverted { 0x200000 } else { 0 })?;
 
         Ok(())
     }
 
     /// Enable or disable the peripheral (`CR.ENABLE`).
     pub fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.regs().cr().modify(|_, w| w.enable().bit(enabled));
+        self.regs()
+            .cr()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !0x1) | (enabled as u32)) });
         wait_isr::<T>(ISR_CROK, TimeoutTarget::Crok)
     }
 
@@ -646,8 +627,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
 
     /// Enable or disable timeout mode (`CFGR.TIMEOUT`).
     pub fn set_timeout_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.regs().cfgr().modify(|_, w| w.timeout().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        self.modify_cfgr_bits(0x80000, if enabled { 0x80000 } else { 0 })
     }
 
     /// Enable or disable wake sources used with STOP modes.
@@ -662,14 +642,12 @@ impl<'d, T: Instance> LpTimer<'d, T> {
 
     /// Enable or disable waveform generation (`CFGR.WAVE`).
     pub fn set_wave_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.regs().cfgr().modify(|_, w| w.wave().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        self.modify_cfgr_bits(0x100000, if enabled { 0x100000 } else { 0 })
     }
 
     /// Enable or disable encoder mode (`CFGR.ENC`).
     pub fn set_encoder_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.regs().cfgr().modify(|_, w| w.enc().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        self.modify_cfgr_bits(0x1000000, if enabled { 0x1000000 } else { 0 })
     }
 
     /// Configure external trigger polarity.
@@ -692,8 +670,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
 
     /// Enable or disable the trigger digital filter.
     pub fn set_trigger_filter_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.regs().cfgr().modify(|_, w| w.trgflt_en().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        self.modify_cfgr_bits(0x100, if enabled { 0x100 } else { 0 })
     }
 
     /// Configure the external clock digital filter value.
@@ -704,8 +681,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
 
     /// Enable or disable the external clock digital filter.
     pub fn set_clock_filter_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.regs().cfgr().modify(|_, w| w.ckflt_en().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        self.modify_cfgr_bits(0x20, if enabled { 0x20 } else { 0 })
     }
 
     /// Configure external clock edge polarity.
