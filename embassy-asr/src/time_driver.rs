@@ -143,7 +143,7 @@ impl LptimTimeDriver {
         let _ = rcc::disable_peripheral(RccPeripheral::Lptimer0);
         let _ = rcc::reset_peripheral(RccPeripheral::Lptimer0);
         let _ = set_lptim0_clock_source();
-        rcc::enable_peripheral(RccPeripheral::Lptimer0).expect("embassy-asr: failed to enable LPTIM0 clock");
+        let _ = rcc::enable_peripheral(RccPeripheral::Lptimer0);
 
         // Configure LPTIM0: continuous, prescaler /1, no preload/wave, max ARR
         wait_isr(ISR_CFGROK);
