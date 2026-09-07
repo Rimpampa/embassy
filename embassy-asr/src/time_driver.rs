@@ -131,6 +131,8 @@ fn set_lptim0_clock_source() -> Result<(), rcc::Error> {
 
 impl LptimTimeDriver {
     fn init(&'static self) {
+        #[cfg(feature = "defmt")]
+        defmt::debug!("lptim0 init");
         assert!(TICK_HZ == TIMER_TICK_HZ, "embassy-asr: time tick rate must be 32768 Hz");
 
         // XO32K is in the always-on domain. Clear its AFEC power-down bits
