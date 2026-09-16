@@ -1239,18 +1239,20 @@ impl<'d> embedded_io_async::Read for Lpuart<'d, Async> {
 // --- Instance --------------------------------------------------------------
 
 mod sealed {
+    #[allow(private_interfaces)]
     pub trait Instance {
         fn info() -> &'static super::Info;
     }
 }
 
 /// LPUART instance.
-#[allow(private_bounds)]
+#[allow(private_bounds, private_interfaces)]
 pub trait Instance: sealed::Instance + PeripheralType + 'static {
     /// NVIC vector for LPUART.
     type Interrupt: Interrupt;
 }
 
+#[allow(private_interfaces)]
 impl sealed::Instance for peripherals::LPUART {
     fn info() -> &'static Info {
         info()

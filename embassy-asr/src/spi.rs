@@ -1019,13 +1019,14 @@ impl<'d, M: Mode> Drop for Spi<'d, M> {
 mod sealed {
     use super::Info;
 
+    #[allow(private_interfaces)]
     pub trait Instance {
         fn info() -> &'static Info;
     }
 }
 
 /// SSP instance.
-#[allow(private_bounds)]
+#[allow(private_bounds, private_interfaces)]
 pub trait Instance: sealed::Instance + PeripheralType + 'static {
     /// NVIC vector for this SSP.
     type Interrupt: TypelevelInterrupt;
@@ -1033,6 +1034,7 @@ pub trait Instance: sealed::Instance + PeripheralType + 'static {
 
 macro_rules! impl_instance {
     ($peri:ident, $pac:ident, $rcc:ident, $pclk:ident, $tx:ident, $rx:ident, $state:ident, $irq:ident) => {
+        #[allow(private_interfaces)]
         impl sealed::Instance for peripherals::$peri {
             fn info() -> &'static Info {
                 static INFO: Info = Info {

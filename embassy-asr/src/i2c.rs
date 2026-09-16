@@ -1051,7 +1051,7 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
             if regs.sr().read().slave_addr_det().bit_is_set() {
                 clear_sr(regs, SR_SLAVE_ADDR_DET);
                 // RW_MODE mirrors the R/W bit: 0 = master write / slave read.
-                let op = if (regs.sr().read().bits() & (1 << 17) != 0) {
+                let op = if regs.sr().read().bits() & (1 << 17) != 0 {
                     SlaveOp::Write
                 } else {
                     SlaveOp::Read
@@ -1157,7 +1157,7 @@ impl<'d> I2cSlave<'d, Async> {
                 }
                 if regs.sr().read().slave_addr_det().bit_is_set() {
                     clear_sr(regs, SR_SLAVE_ADDR_DET);
-                    op = if (regs.sr().read().bits() & (1 << 17) != 0) {
+                    op = if regs.sr().read().bits() & (1 << 17) != 0 {
                         SlaveOp::Write
                     } else {
                         SlaveOp::Read
@@ -1288,13 +1288,14 @@ impl<'d> embedded_hal_async::i2c::I2c<embedded_hal::i2c::SevenBitAddress> for I2
 mod sealed {
     use super::Info;
 
+    #[allow(private_interfaces)]
     pub trait Instance {
         fn info() -> &'static Info;
     }
 }
 
 /// I2C instance (I2C0–I2C2).
-#[allow(private_bounds)]
+#[allow(private_bounds, private_interfaces)]
 pub trait Instance: sealed::Instance + PeripheralType + 'static {
     /// NVIC vector for this I2C.
     type Interrupt: TypelevelInterrupt;
@@ -1302,6 +1303,7 @@ pub trait Instance: sealed::Instance + PeripheralType + 'static {
 
 macro_rules! impl_i2c {
     ($peri:ident, $interrupt:ident, $base:expr, $rcc:ident, $pclk:ident, $state:ident) => {
+        #[allow(private_interfaces)]
         impl sealed::Instance for peripherals::$peri {
             fn info() -> &'static Info {
                 static INFO: Info = Info {
