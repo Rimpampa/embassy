@@ -372,7 +372,7 @@ impl<'d> Pwr<'d> {
 
         pwr.cr1().modify(|r, w| unsafe {
             let mut bits = r.bits() | CR1_DEEP_SLEEP_ENABLE;
-            if unsafe { core::ptr::read_volatile(FLASH_INFO_TRIM) } & 0x03 == 0 {
+            if core::ptr::read_volatile(FLASH_INFO_TRIM) & 0x03 == 0 {
                 bits = (bits & !CR1_TRIM_MASK) | CR1_TRIM_DEFAULT;
             }
             w.bits(bits)
