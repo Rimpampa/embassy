@@ -18,7 +18,7 @@
 use core::cell::UnsafeCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering, compiler_fence};
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering, compiler_fence};
 use core::task::Poll;
 
 use embassy_hal_internal::interrupt::Priority;
@@ -866,23 +866,39 @@ impl<'d> UartTx<'d, Async> {
     }
 
     /// Wait until TX FIFO empty and UART not busy.
+    ///
+    /// The ASR6601 TX FIFO level interrupt is a one-shot per threshold
+    /// crossing: it does not re-assert while the FIFO keeps draining (unlike
+    /// the PL011), so the final `TXFE && !BUSY` state is never signaled by an
+    /// interrupt. Besides the interrupt, re-check the flags on a timer.
+    ///
+    /// The re-check interval must stay in the millisecond range: LPTIM0
+    /// compare values only a few ticks ahead of the running counter are
+    /// missed for the current 2 s cycle on this silicon, delaying the alarm
+    /// by up to one full period.
     pub async fn flush(&mut self) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
-        poll_fn(|cx| {
-            if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
-                return Poll::Ready(());
+        loop {
+            let event = poll_fn(|cx| {
+                if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
+                    return Poll::Ready(());
+                }
+                // TX interrupt fires when the FIFO drops to the threshold.
+                info.state.tx_waker.register(cx.waker());
+                set_imsc_bits(regs, INT_TX, true);
+                if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
+                    set_imsc_bits(regs, INT_TX, false);
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            });
+            let timer = embassy_time::Timer::at(embassy_time::Instant::now() + embassy_time::Duration::from_millis(5));
+            match embassy_futures::select::select(event, timer).await {
+                embassy_futures::select::Either::First(()) => break,
+                embassy_futures::select::Either::Second(()) => continue,
             }
-            // TX interrupt fires when FIFO drops to the threshold; also useful while draining.
-            info.state.tx_waker.register(cx.waker());
-            set_imsc_bits(regs, INT_TX, true);
-            if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
-                set_imsc_bits(regs, INT_TX, false);
-                return Poll::Ready(());
-            }
-            Poll::Pending
-        })
-        .await;
+        }
         set_imsc_bits(regs, INT_TX, false);
         Ok(())
     }
@@ -962,15 +978,13 @@ impl<'d> UartRx<'d, Async> {
     async fn wait_rx_ready(&mut self) {
         let info = self.info;
         poll_fn(|cx| {
-            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire)
-            {
+            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire) {
                 return Poll::Ready(());
             }
             info.state.rx_waker.register(cx.waker());
             // Make sure the RX interrupt is armed so the ISR keeps capturing.
             set_imsc_bits(info.regs(), INT_RX_ALL, true);
-            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire)
-            {
+            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire) {
                 return Poll::Ready(());
             }
             Poll::Pending
@@ -988,7 +1002,9 @@ impl<'d> UartRx<'d, Async> {
             return Ok(None);
         }
         let b = unsafe { *(&raw const (*info.state.rx_buf.get())[tail]) };
-        info.state.rx_tail.store(((tail + 1) % RX_BUF_CAP) as u16, Ordering::Release);
+        info.state
+            .rx_tail
+            .store(((tail + 1) % RX_BUF_CAP) as u16, Ordering::Release);
         Ok(Some(b))
     }
 
