@@ -55,6 +55,12 @@ const POLL_LIMIT: u32 = 1_000_000;
 // `embassy-stm32/src/time_driver/lptim.rs`).
 const COMPARE_THRESHOLD: u64 = 0xc000;
 
+// Note: a compare value only a few ticks ahead of the running counter is
+// missed for the current 2 s cycle on this silicon (the new value is not
+// evaluated until the next overflow); such an alarm then fires up to one full
+// period late. Keep short (sub-millisecond) deadlines in mind when using this
+// driver.
+
 struct LptimTimeDriver {
     initialized: AtomicBool,
     period: AtomicU32,
