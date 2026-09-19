@@ -71,7 +71,7 @@ impl Default for Config {
 }
 
 mod sealed {
-    use crate::pac::bstimer0::RegisterBlock;
+    use crate::pac::bstim0::RegisterBlock;
     use crate::rcc::Peripheral;
 
     pub trait Instance {
@@ -93,7 +93,7 @@ macro_rules! impl_instance {
     ($name:ident, $pac:ident, $interrupt:ident, $peripheral:ident, $number:expr, $base:expr) => {
         impl sealed::Instance for peripherals::$name {
             #[inline]
-            fn regs() -> &'static pac::bstimer0::RegisterBlock {
+            fn regs() -> &'static pac::bstim0::RegisterBlock {
                 unsafe { &*pac::$pac::PTR }
             }
 
@@ -119,8 +119,8 @@ macro_rules! impl_instance {
     };
 }
 
-impl_instance!(BSTIMER0, Bstimer0, BSTIMER0, Bstimer0, 0, 0x4000_c000);
-impl_instance!(BSTIMER1, Bstimer1, BSTIMER1, Bstimer1, 1, 0x4001_c000);
+impl_instance!(BSTIMER0, Bstim0, BSTIM0, Bstimer0, 0, 0x4000_c000);
+impl_instance!(BSTIMER1, Bstim1, BSTIM1, Bstimer1, 1, 0x4001_c000);
 
 /// Interrupt handler for one BSTIMER instance.
 ///

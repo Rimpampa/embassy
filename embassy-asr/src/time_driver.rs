@@ -75,8 +75,8 @@ embassy_time_driver::time_driver_impl!(static DRIVER: LptimTimeDriver = LptimTim
     queue: Mutex::new(RefCell::new(Queue::new())),
 });
 
-fn lptim() -> pac::Lptimer0 {
-    unsafe { pac::Lptimer0::steal() }
+fn lptim() -> pac::Lptim0 {
+    unsafe { pac::Lptim0::steal() }
 }
 
 fn wait_isr(mask: u32) {
@@ -115,21 +115,21 @@ impl LptimTimeDriver {
         // `rcc_set_lptimer0_clk_source`). New PAC has proper variants.
         critical_section::with(|_| {
             // Gate functional clock and wait for sync clear if needed.
-            let sync = || unsafe { pac::Rcc::steal() }.sr1().read().lptimer0_clk_en_sync().bit_is_set();
+            let sync = || unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set();
             if sync() {
                 unsafe { pac::Rcc::steal() }
                     .cgr1()
-                    .modify(|_, w| w.lptimer0_clk_en().clear_bit());
+                    .modify(|_, w| w.lptim0_clk_en().clear_bit());
                 for _ in 0..POLL_LIMIT {
-                    if !unsafe { pac::Rcc::steal() }.sr1().read().lptimer0_clk_en_sync().bit_is_set() {
+                    if !unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set() {
                         break;
                     }
                     core::hint::spin_loop();
                 }
             }
             unsafe { pac::Rcc::steal() }.cr1().modify(|_, w| {
-                w.lptimer0_extclk_sel().clear_bit();
-                w.lptimer0_clk_sel().xo32k()
+                w.lptim0_ext_clk_sel().clear_bit();
+                w.lptim0_clk_sel().xo32k()
             });
         });
 
@@ -142,7 +142,7 @@ impl LptimTimeDriver {
         // Disarm interrupts before reconfiguring so no stale bootloader setup
         // can fire while registers are being reprogrammed.
         lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !(IER_ARRM | IER_CMPM)) });
-        Interrupt::LPTIMER0.unpend();
+        Interrupt::LPTIM0.unpend();
 
         // Configure: internal clock, prescaler /1, no preload, no wave.
         wait_isr(ISR_CFGROK);
@@ -187,9 +187,9 @@ impl LptimTimeDriver {
         self.period.store(0, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
 
-        Interrupt::LPTIMER0.unpend();
-        Interrupt::LPTIMER0.set_priority(Priority::P2);
-        unsafe { Interrupt::LPTIMER0.enable() };
+        Interrupt::LPTIM0.unpend();
+        Interrupt::LPTIM0.set_priority(Priority::P2);
+        unsafe { Interrupt::LPTIM0.enable() };
     }
 
     fn now_inner(&self) -> u64 {
@@ -304,6 +304,6 @@ pub(crate) fn init() {
 }
 
 #[interrupt]
-fn LPTIMER0() {
+fn LPTIM0() {
     DRIVER.on_interrupt();
 }

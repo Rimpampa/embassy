@@ -758,6 +758,44 @@ impl<'d> Channel<'d, Async> {
     }
 }
 
+/// Generate low/high-half writers for one DMA channel register.
+///
+/// The regenerated PAC models each channel register (`SARn`, `DARn`, `LLPn`,
+/// `CTLn`, `CFGn`) as a single `u64` with only the low 32 bits described,
+/// replacing the old split `_l`/`_h` 32-bit registers. These helpers preserve
+/// the old split-access semantics bit-for-bit via read-modify-write, so
+/// existing write sequences (including write-low-half-only ones) behave
+/// exactly as before.
+macro_rules! ch_reg_w {
+    ($write_lo:ident, $write_hi:ident, $r0:ident, $r1:ident, $r2:ident, $r3:ident) => {
+        fn $write_lo(&self, value: u32) {
+            let regs = self.regs();
+            let value = u64::from(value);
+            unsafe {
+                match self.channel {
+                    0 => regs.$r0().modify(|r, w| w.bits(r.bits() & !0xffff_ffff | value)),
+                    1 => regs.$r1().modify(|r, w| w.bits(r.bits() & !0xffff_ffff | value)),
+                    2 => regs.$r2().modify(|r, w| w.bits(r.bits() & !0xffff_ffff | value)),
+                    _ => regs.$r3().modify(|r, w| w.bits(r.bits() & !0xffff_ffff | value)),
+                };
+            }
+        }
+
+        fn $write_hi(&self, value: u32) {
+            let regs = self.regs();
+            let value = u64::from(value) << 32;
+            unsafe {
+                match self.channel {
+                    0 => regs.$r0().modify(|r, w| w.bits(r.bits() & 0xffff_ffff | value)),
+                    1 => regs.$r1().modify(|r, w| w.bits(r.bits() & 0xffff_ffff | value)),
+                    2 => regs.$r2().modify(|r, w| w.bits(r.bits() & 0xffff_ffff | value)),
+                    _ => regs.$r3().modify(|r, w| w.bits(r.bits() & 0xffff_ffff | value)),
+                };
+            }
+        }
+    };
+}
+
 impl<'d, M: Mode> Channel<'d, M> {
     fn from_instance<T: ChannelInstance>() -> Self {
         Self {
@@ -794,16 +832,28 @@ impl<'d, M: Mode> Channel<'d, M> {
         &STATE[self.state_index()]
     }
 
-    fn regs(&self) -> &'static pac::dma0::RegisterBlock {
+    fn regs(&self) -> &'static pac::dmac0::RegisterBlock {
         controller_regs(self.controller)
     }
 
-    fn channel_regs(&self) -> &'static pac::dma0::Ch {
-        self.regs().ch(self.channel)
+    ch_reg_w!(ch_sar_lo, ch_sar_hi, sar0, sar1, sar2, sar3);
+    ch_reg_w!(ch_dar_lo, ch_dar_hi, dar0, dar1, dar2, dar3);
+    ch_reg_w!(ch_llp_lo, ch_llp_hi, llp0, llp1, llp2, llp3);
+    ch_reg_w!(ch_ctl_lo, ch_ctl_hi, ctl0, ctl1, ctl2, ctl3);
+
+    fn ch_cfg_read(&self) -> u64 {
+        match self.channel {
+            0 => self.regs().cfg0().read().bits(),
+            1 => self.regs().cfg1().read().bits(),
+            2 => self.regs().cfg2().read().bits(),
+            _ => self.regs().cfg3().read().bits(),
+        }
     }
 
+    ch_reg_w!(ch_cfg_lo, ch_cfg_hi, cfg0, cfg1, cfg2, cfg3);
+
     fn is_enabled(&self) -> bool {
-        self.regs().chenreg_l().read().bits() & channel_bit(self.channel) != 0
+        self.regs().chenreg().read().bits() & u64::from(channel_bit(self.channel)) != 0
     }
 
     fn start_copy_inner<'a, W: Word>(
@@ -945,14 +995,9 @@ impl<'d, M: Mode> Channel<'d, M> {
             interrupts,
         )?;
 
-        let channel = self.channel_regs();
-        unsafe {
-            channel.llp_l().write_with_zero(|w| w.bits(descriptor_base));
-            channel.llp_h().write_with_zero(|w| w.bits(0));
-            channel
-                .ctl_l()
-                .write_with_zero(|w| w.bits(control_low(first.config, true)));
-        }
+        self.ch_llp_lo(descriptor_base);
+        self.ch_llp_hi(0);
+        self.ch_ctl_lo(control_low(first.config, true));
         compiler_fence(Ordering::SeqCst);
         self.enable();
 
@@ -1014,21 +1059,16 @@ impl<'d, M: Mode> Channel<'d, M> {
 
         let source_addr = address_to_u32(source as usize)?;
         let destination_addr = address_to_u32(destination as usize)?;
-        let channel = self.channel_regs();
-        unsafe {
-            channel.sar_l().write_with_zero(|w| w.bits(source_addr));
-            channel.sar_h().write_with_zero(|w| w.bits(0));
-            channel.dar_l().write_with_zero(|w| w.bits(destination_addr));
-            channel.dar_h().write_with_zero(|w| w.bits(0));
-            channel.llp_l().write_with_zero(|w| w.bits(0));
-            channel.llp_h().write_with_zero(|w| w.bits(0));
-            channel.ctl_l().write_with_zero(|w| w.bits(control_low(config, false)));
-            channel
-                .ctl_h()
-                .write_with_zero(|w| w.bits(control_high(transfer_count)));
-            channel.cfg_l().write_with_zero(|w| w.bits(cfg_low));
-            channel.cfg_h().write_with_zero(|w| w.bits(cfg_high));
-        }
+        self.ch_sar_lo(source_addr);
+        self.ch_sar_hi(0);
+        self.ch_dar_lo(destination_addr);
+        self.ch_dar_hi(0);
+        self.ch_llp_lo(0);
+        self.ch_llp_hi(0);
+        self.ch_ctl_lo(control_low(config, false));
+        self.ch_ctl_hi(control_high(transfer_count));
+        self.ch_cfg_lo(cfg_low);
+        self.ch_cfg_hi(cfg_high);
 
         compiler_fence(Ordering::SeqCst);
 
@@ -1052,14 +1092,15 @@ impl<'d, M: Mode> Channel<'d, M> {
     fn enable(&self) {
         compiler_fence(Ordering::SeqCst);
         let regs = self.regs();
-        if regs.dmacfgreg_l().read().bits() & 1 == 0 {
+        if regs.dmacfgreg().read().bits() & 1 == 0 {
             unsafe {
-                regs.dmacfgreg_l().write_with_zero(|w| w.bits(1));
+                regs.dmacfgreg().write_with_zero(|w| w.bits(1));
             }
         }
         let bit = channel_bit(self.channel);
         unsafe {
-            regs.chenreg_l().write_with_zero(|w| w.bits(bit | (bit << 8)));
+            regs.chenreg()
+                .write_with_zero(|w| w.bits(u64::from(bit) | (u64::from(bit) << 8)));
         }
         compiler_fence(Ordering::SeqCst);
     }
@@ -1079,9 +1120,9 @@ impl<'d, M: Mode> Channel<'d, M> {
         }
 
         let complete = if self.state().event.load(Ordering::Relaxed) == EVENT_BLOCK {
-            self.regs().status_block_l().read().bits() & bit != 0
+            self.regs().status_block().read().bits() & u64::from(bit) != 0
         } else {
-            self.regs().status_tfr_l().read().bits() & bit != 0
+            self.regs().status_tfr().read().bits() & u64::from(bit) != 0
         };
 
         if complete || !self.is_enabled() {
@@ -1121,21 +1162,16 @@ impl<'d, M: Mode> Channel<'d, M> {
         self.mask_interrupts();
 
         if self.is_enabled() {
-            let channel = self.channel_regs();
-            channel
-                .cfg_l()
-                .modify(|r, w| unsafe { w.bits(r.bits() | CFG_L_CHANNEL_SUSPEND) });
-            while channel.cfg_l().read().bits() & CFG_L_FIFO_EMPTY == 0 {}
+            self.ch_cfg_lo(self.ch_cfg_read() as u32 | CFG_L_CHANNEL_SUSPEND);
+            while self.ch_cfg_read() & u64::from(CFG_L_FIFO_EMPTY) == 0 {}
 
             let bit = channel_bit(self.channel);
             unsafe {
-                self.regs().chenreg_l().write_with_zero(|w| w.bits(bit << 8));
+                self.regs().chenreg().write_with_zero(|w| w.bits(u64::from(bit) << 8));
             }
             while self.is_enabled() {}
 
-            channel
-                .cfg_l()
-                .modify(|r, w| unsafe { w.bits(r.bits() & !CFG_L_CHANNEL_SUSPEND) });
+            self.ch_cfg_lo(self.ch_cfg_read() as u32 & !CFG_L_CHANNEL_SUSPEND);
         }
 
         self.clear_pending();
@@ -1292,8 +1328,8 @@ fn controller_base(controller: usize) -> usize {
     }
 }
 
-fn controller_regs(controller: usize) -> &'static pac::dma0::RegisterBlock {
-    unsafe { &*(controller_base(controller) as *const pac::dma0::RegisterBlock) }
+fn controller_regs(controller: usize) -> &'static pac::dmac0::RegisterBlock {
+    unsafe { &*(controller_base(controller) as *const pac::dmac0::RegisterBlock) }
 }
 
 fn channel_bit(channel: usize) -> u32 {
@@ -1319,26 +1355,26 @@ fn set_mask(controller: usize, offset: usize, channel: usize, enabled: bool) {
 fn on_interrupt(controller: usize) {
     let regs = controller_regs(controller);
     let errors = read_register(controller, STATUS_ERR_OFFSET) & 0x0f;
-    let transfers = regs.status_tfr_l().read().bits() & 0x0f;
-    let blocks = regs.status_block_l().read().bits() & 0x0f;
+    let transfers = regs.status_tfr().read().bits() & 0x0f;
+    let blocks = regs.status_block().read().bits() & 0x0f;
 
     if errors != 0 {
         write_register(controller, CLEAR_ERR_OFFSET, errors);
     }
     if transfers != 0 {
-        write_register(controller, CLEAR_TFR_OFFSET, transfers);
+        write_register(controller, CLEAR_TFR_OFFSET, transfers as u32);
     }
     if blocks != 0 {
-        write_register(controller, CLEAR_BLOCK_OFFSET, blocks);
+        write_register(controller, CLEAR_BLOCK_OFFSET, blocks as u32);
     }
 
     for channel in 0..CHANNELS_PER_CONTROLLER {
         let bit = channel_bit(channel);
         let state = &STATE[controller * CHANNELS_PER_CONTROLLER + channel];
         let complete = if state.event.load(Ordering::Relaxed) == EVENT_BLOCK {
-            blocks & bit != 0
+            blocks & u64::from(bit) != 0
         } else {
-            transfers & bit != 0
+            transfers & u64::from(bit) != 0
         };
 
         if errors & bit != 0 {
@@ -1378,16 +1414,16 @@ pub(crate) unsafe fn init() {
     rcc.rst1()
         .modify(|_, w| w.dmac0_rst_n().set_bit().dmac1_rst_n().set_bit());
 
-    pac::Interrupt::DMA0.disable();
-    pac::Interrupt::DMA1.disable();
+    pac::Interrupt::DMAC0.disable();
+    pac::Interrupt::DMAC1.disable();
 
     for controller in 0..CONTROLLER_COUNT {
         let regs = controller_regs(controller);
         unsafe {
             // Disable all four channels using the CH_EN write-enable bits.
-            regs.chenreg_l().write_with_zero(|w| w.bits(0x0f00));
+            regs.chenreg().write_with_zero(|w| w.bits(0x0f00));
         }
-        while regs.chenreg_l().read().bits() & 0x0f != 0 {}
+        while regs.chenreg().read().bits() & 0x0f != 0 {}
 
         set_mask(controller, MASK_TFR_OFFSET, 0, false);
         set_mask(controller, MASK_TFR_OFFSET, 1, false);
@@ -1409,7 +1445,7 @@ pub(crate) unsafe fn init() {
         write_register(controller, CLEAR_ERR_OFFSET, 0x0f);
 
         unsafe {
-            regs.dmacfgreg_l().write_with_zero(|w| w.bits(1));
+            regs.dmacfgreg().write_with_zero(|w| w.bits(1));
         }
     }
 
@@ -1418,10 +1454,10 @@ pub(crate) unsafe fn init() {
         state.event.store(EVENT_TRANSFER, Ordering::Relaxed);
     }
 
-    pac::Interrupt::DMA0.unpend();
-    pac::Interrupt::DMA1.unpend();
-    pac::Interrupt::DMA0.set_priority(Priority::P2);
-    pac::Interrupt::DMA1.set_priority(Priority::P2);
+    pac::Interrupt::DMAC0.unpend();
+    pac::Interrupt::DMAC1.unpend();
+    pac::Interrupt::DMAC0.set_priority(Priority::P2);
+    pac::Interrupt::DMAC1.set_priority(Priority::P2);
 }
 
 macro_rules! controller {
@@ -1446,8 +1482,8 @@ macro_rules! channel {
     };
 }
 
-controller!(DMA0, 0, DMA0);
-controller!(DMA1, 1, DMA1);
+controller!(DMA0, 0, DMAC0);
+controller!(DMA1, 1, DMAC1);
 
 channel!(DMA0_CH0, DMA0, 0);
 channel!(DMA0_CH1, DMA0, 1);
