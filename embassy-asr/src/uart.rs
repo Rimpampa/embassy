@@ -876,9 +876,15 @@ impl<'d> UartTx<'d, Async> {
     /// compare values only a few ticks ahead of the running counter are
     /// missed for the current 2 s cycle on this silicon, delaying the alarm
     /// by up to one full period.
+    ///
+    /// Requires the `embassy-time` driver to be initialized (used for the re-check timer).
     pub async fn flush(&mut self) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        // Fast path: already drained, avoid arming the interrupt and timer.
+        if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
+            return Ok(());
+        }
         loop {
             let event = poll_fn(|cx| {
                 if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
@@ -893,7 +899,7 @@ impl<'d> UartTx<'d, Async> {
                 }
                 Poll::Pending
             });
-            let timer = embassy_time::Timer::at(embassy_time::Instant::now() + embassy_time::Duration::from_millis(5));
+            let timer = embassy_time::Timer::after(embassy_time::Duration::from_millis(5));
             match embassy_futures::select::select(event, timer).await {
                 embassy_futures::select::Either::First(()) => break,
                 embassy_futures::select::Either::Second(()) => continue,
