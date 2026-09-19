@@ -38,14 +38,14 @@ const ANALOG_27_OUTPUT_ENABLE: u32 = 3 << 11;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TriggerSource {
-    /// GPTIMER1 TRGO.
-    Gptimer1Trgo,
-    /// GPTIMER0 TRGO.
-    Gptimer0Trgo,
-    /// BSTIMER1 TRGO.
-    Bstimer1Trgo,
-    /// BSTIMER0 TRGO.
-    Bstimer0Trgo,
+    /// GPTIM1 TRGO.
+    Gptim1Trgo,
+    /// GPTIM0 TRGO.
+    Gptim0Trgo,
+    /// BSTIM1 TRGO.
+    Bstim1Trgo,
+    /// BSTIM0 TRGO.
+    Bstim0Trgo,
     /// External GPIO6 edge.
     Gpio6,
     /// External GPIO24 edge.
@@ -195,10 +195,10 @@ impl<'d> Dac<'d> {
         self.trigger_source = config.trigger_source;
 
         let trig_src = match config.trigger_source {
-            TriggerSource::Gptimer1Trgo => Some(TrigSrcSel::Gptimer1Trgo),
-            TriggerSource::Gptimer0Trgo => Some(TrigSrcSel::Gptimer0Trgo),
-            TriggerSource::Bstimer1Trgo => Some(TrigSrcSel::Bstimer1Trgo),
-            TriggerSource::Bstimer0Trgo => Some(TrigSrcSel::Bstimer0Trgo),
+            TriggerSource::Gptim1Trgo => Some(TrigSrcSel::Gptim1Trgo),
+            TriggerSource::Gptim0Trgo => Some(TrigSrcSel::Gptim0Trgo),
+            TriggerSource::Bstim1Trgo => Some(TrigSrcSel::Bstim1Trgo),
+            TriggerSource::Bstim0Trgo => Some(TrigSrcSel::Bstim0Trgo),
             TriggerSource::Gpio6 => Some(TrigSrcSel::Gpio6),
             TriggerSource::Gpio24 => Some(TrigSrcSel::Gpio24),
             TriggerSource::Gpio43 => Some(TrigSrcSel::Gpio43),

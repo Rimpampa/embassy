@@ -441,7 +441,7 @@ impl<'d, M: Mode> Spi<'d, M> {
             if self.rx_dma.is_some() {
                 dma_cr |= DMA_RX;
             }
-            regs.dma_cr().write_with_zero(|w| w.bits(dma_cr));
+            regs.dmacr().write_with_zero(|w| w.bits(dma_cr));
         }
         self.data_width = config.data_width;
         Ok(())
@@ -1009,7 +1009,7 @@ impl<'d, M: Mode> Drop for Spi<'d, M> {
         unsafe {
             let regs = &*self.info.regs;
             regs.imsc().write_with_zero(|w| w.bits(0));
-            regs.dma_cr().write_with_zero(|w| w.bits(0));
+            regs.dmacr().write_with_zero(|w| w.bits(0));
             regs.icr().write_with_zero(|w| w.bits(INT_ROR | INT_RT));
         }
         self.info.interrupt.disable();

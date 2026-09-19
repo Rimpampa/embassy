@@ -144,8 +144,8 @@ impl<'d> Flash<'d> {
             let d0 = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
             let d1 = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
             unsafe {
-                efc.program_data0().write_with_zero(|w| w.bits(d0));
-                efc.program_data1().write_with_zero(|w| w.bits(d1));
+                efc.prog_data0().write_with_zero(|w| w.bits(d0));
+                efc.prog_data1().write_with_zero(|w| w.bits(d1));
                 write_volatile((FLASH_BASE + offset + i as u32) as *mut u32, 0xffff_ffff);
             }
             if flash_access::take_error() {

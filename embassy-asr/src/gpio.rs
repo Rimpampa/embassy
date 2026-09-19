@@ -2,7 +2,7 @@
 //!
 //! The register programming in this driver follows the vendor
 //! `tremo_gpio.c` implementation. In particular, an `OER` bit disables the
-//! output driver when set, `IFR` is treated as write-one-to-clear, and
+//! output driver when set, `FR` is treated as write-one-to-clear, and
 //! open-drain operation on PD8..PD15 is emulated by switching `OER`.
 
 use core::convert::Infallible;
@@ -358,7 +358,7 @@ fn interrupt_mask(pin: u8) -> u32 {
 fn clear_interrupt(port: Port, pin: u8) {
     let mask = interrupt_mask(pin);
     unsafe {
-        regs(port).ifr().write_with_zero(|w| w.bits(mask));
+        regs(port).fr().write_with_zero(|w| w.bits(mask));
     }
 }
 
@@ -369,9 +369,10 @@ fn set_interrupt(port: Port, pin: u8, mode: u32) {
 
     critical_section::with(|_| {
         let gpio = regs(port);
-        gpio.icr().modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) });
+        gpio.int_cr()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) });
         unsafe {
-            gpio.ifr().write_with_zero(|w| w.bits(mask));
+            gpio.fr().write_with_zero(|w| w.bits(mask));
         }
     });
 }
@@ -387,13 +388,13 @@ impl Handler<crate::interrupt::typelevel::GPIO> for InterruptHandler {
         for port_index in 0..PORT_COUNT as u8 {
             let port = Port::from_index(port_index);
             let gpio = regs(port);
-            let flags = gpio.ifr().read().bits();
+            let flags = gpio.fr().read().bits();
 
             if flags == 0 {
                 continue;
             }
 
-            let configured = gpio.icr().read().bits();
+            let configured = gpio.int_cr().read().bits();
             let mut disable_mask = 0;
             let mut wake_mask = 0u16;
 
@@ -406,13 +407,13 @@ impl Handler<crate::interrupt::typelevel::GPIO> for InterruptHandler {
             }
 
             if disable_mask != 0 {
-                gpio.icr().modify(|r, w| unsafe { w.bits(r.bits() & !disable_mask) });
+                gpio.int_cr().modify(|r, w| unsafe { w.bits(r.bits() & !disable_mask) });
             }
 
-            // `tremo_gpio.c` establishes that IFR is W1C even though the PAC
+            // `tremo_gpio.c` establishes that FR is W1C even though the PAC
             // currently describes it only as an unstructured RW register.
             unsafe {
-                gpio.ifr().write_with_zero(|w| w.bits(flags));
+                gpio.fr().write_with_zero(|w| w.bits(flags));
             }
 
             for pin in 0..PINS_PER_PORT {
@@ -457,7 +458,7 @@ impl Future for InputFuture<'_> {
         let index = this.pin.id as usize;
         PIN_WAKERS[index].register(cx.waker());
 
-        let mode = regs(this.pin.port()).icr().read().bits() & interrupt_mask(this.pin.pin());
+        let mode = regs(this.pin.port()).int_cr().read().bits() & interrupt_mask(this.pin.pin());
         if mode == INTERRUPT_NONE {
             Poll::Ready(())
         } else {
@@ -856,9 +857,9 @@ impl<'d, M: Mode> Flex<'d, M> {
         let mask = self.mask();
         critical_section::with(|_| {
             let gpio = regs(self.port());
-            gpio.wucr()
+            gpio.wu_en()
                 .modify(|r, w| unsafe { w.bits(if enable { r.bits() | mask } else { r.bits() & !mask }) });
-            gpio.wulvl().modify(|r, w| unsafe {
+            gpio.wu_lvl().modify(|r, w| unsafe {
                 w.bits(if level == Level::High {
                     r.bits() | mask
                 } else {
@@ -895,7 +896,7 @@ impl<'d, M: Mode> Flex<'d, M> {
         let value = offset | if level == Level::High { 0x4 } else { 0 } | if enable { 0x8 } else { 0 };
 
         regs(port)
-            .stop3_wucr()
+            .stop3_wu_cr()
             .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (value << shift)) });
         Ok(())
     }

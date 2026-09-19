@@ -112,8 +112,8 @@ impl<'d> Rng<'d> {
     }
 
     #[inline]
-    fn regs() -> pac::Rng {
-        unsafe { pac::Rng::steal() }
+    fn regs() -> pac::Rngc {
+        unsafe { pac::Rngc::steal() }
     }
 }
 

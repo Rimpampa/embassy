@@ -127,7 +127,7 @@ mod sealed {
     use super::*;
 
     pub trait Instance {
-        fn regs() -> &'static pac::timer0::RegisterBlock;
+        fn regs() -> &'static pac::gptim0::RegisterBlock;
         fn rcc_peripheral() -> RccPeripheral;
         fn nv_interrupt() -> pac::Interrupt;
         const INDEX: usize;
@@ -322,7 +322,7 @@ macro_rules! impl_timer {
     ($name:ident, $pac:ident, $rcc:ident, $irq:ident, $index:expr, $clock:ident) => {
         impl sealed::Instance for peripherals::$name {
             #[inline]
-            fn regs() -> &'static pac::timer0::RegisterBlock {
+            fn regs() -> &'static pac::gptim0::RegisterBlock {
                 unsafe { &*pac::$pac::ptr() }
             }
 
@@ -350,10 +350,10 @@ macro_rules! impl_timer {
 }
 
 // TIMER0/2 sit on the 0x4000_xxxx bus (PCLK0); TIMER1/3 on 0x4001_xxxx (PCLK1).
-impl_timer!(TIMER0, Timer0, Timer0, TIMER0, 0, pclk0_hz);
-impl_timer!(TIMER1, Timer1, Timer1, TIMER1, 1, pclk1_hz);
-impl_timer!(TIMER2, Timer2, Timer2, TIMER2, 2, pclk0_hz);
-impl_timer!(TIMER3, Timer3, Timer3, TIMER3, 3, pclk1_hz);
+impl_timer!(TIMER0, Gptim0, Timer0, GPTIM0, 0, pclk0_hz);
+impl_timer!(TIMER1, Gptim1, Timer1, GPTIM1, 1, pclk1_hz);
+impl_timer!(TIMER2, Gptim2, Timer2, GPTIM2, 2, pclk0_hz);
+impl_timer!(TIMER3, Gptim3, Timer3, GPTIM3, 3, pclk1_hz);
 
 /// Interrupt handler for one GPTimer instance.
 ///

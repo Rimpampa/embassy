@@ -810,9 +810,9 @@ fn set_adc_clock_source(source: ClockSource) {
     critical_section::with(|_| {
         let rcc = unsafe { pac::Rcc::steal() };
         // Vendor `rcc_set_adc_clk_source`: gate off, wait sync, then select.
-        if rcc.sr1().read().adc_clk_en_sync().bit_is_set() {
+        if rcc.sr1().read().adcctrl_clk_en_sync().bit_is_set() {
             rcc.cgr0().modify(|_, w| w.adc_clk_en().clear_bit());
-            while rcc.sr1().read().adc_clk_en_sync().bit_is_set() {
+            while rcc.sr1().read().adcctrl_clk_en_sync().bit_is_set() {
                 core::hint::spin_loop();
             }
         }

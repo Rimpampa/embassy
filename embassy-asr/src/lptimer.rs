@@ -330,7 +330,7 @@ mod sealed {
     use super::*;
 
     pub trait Instance {
-        fn regs() -> &'static pac::lptimer0::RegisterBlock;
+        fn regs() -> &'static pac::lptim0::RegisterBlock;
         fn rcc_peripheral() -> RccPeripheral;
         fn nv_interrupt() -> pac::Interrupt;
         const INDEX: usize;
@@ -353,8 +353,8 @@ pub trait Instance: sealed::Instance + PeripheralType + 'static {
 
 impl sealed::Instance for peripherals::LPTIMER0 {
     #[inline]
-    fn regs() -> &'static pac::lptimer0::RegisterBlock {
-        unsafe { &*pac::Lptimer0::ptr() }
+    fn regs() -> &'static pac::lptim0::RegisterBlock {
+        unsafe { &*pac::Lptim0::ptr() }
     }
 
     #[inline]
@@ -364,7 +364,7 @@ impl sealed::Instance for peripherals::LPTIMER0 {
 
     #[inline]
     fn nv_interrupt() -> pac::Interrupt {
-        pac::Interrupt::LPTIMER0
+        pac::Interrupt::LPTIM0
     }
 
     const INDEX: usize = 0;
@@ -373,7 +373,7 @@ impl sealed::Instance for peripherals::LPTIMER0 {
         unsafe { pac::Rcc::steal() }
             .sr1()
             .read()
-            .lptimer0_clk_en_sync()
+            .lptim0_clk_en_sync()
             .bit_is_set()
     }
 
@@ -381,7 +381,7 @@ impl sealed::Instance for peripherals::LPTIMER0 {
         critical_section::with(|_| {
             unsafe { pac::Rcc::steal() }
                 .cgr1()
-                .modify(|_, w| w.lptimer0_clk_en().bit(enable));
+                .modify(|_, w| w.lptim0_clk_en().bit(enable));
         });
     }
 
@@ -389,22 +389,22 @@ impl sealed::Instance for peripherals::LPTIMER0 {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.cr1().modify(|_, w| match source {
-                ClockSource::ExtClk => w.lptimer0_extclk_sel().set_bit(),
+                ClockSource::ExtClk => w.lptim0_ext_clk_sel().set_bit(),
                 ClockSource::Pclk0 => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().pclk0()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    w.lptim0_clk_sel().pclk0()
                 }
                 ClockSource::Rco4m => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().rco4m()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    w.lptim0_clk_sel().rco4m()
                 }
                 ClockSource::Xo32k => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().xo32k()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    w.lptim0_clk_sel().xo32k()
                 }
                 ClockSource::Rco32k => {
-                    w.lptimer0_extclk_sel().clear_bit();
-                    w.lptimer0_clk_sel().rco32k()
+                    w.lptim0_ext_clk_sel().clear_bit();
+                    w.lptim0_clk_sel().rco32k()
                 }
             });
         });
@@ -412,13 +412,13 @@ impl sealed::Instance for peripherals::LPTIMER0 {
 }
 
 impl Instance for peripherals::LPTIMER0 {
-    type Interrupt = interrupt::typelevel::LPTIMER0;
+    type Interrupt = interrupt::typelevel::LPTIM0;
 }
 
 impl sealed::Instance for peripherals::LPTIMER1 {
     #[inline]
-    fn regs() -> &'static pac::lptimer0::RegisterBlock {
-        unsafe { &*pac::Lptimer1::ptr() }
+    fn regs() -> &'static pac::lptim0::RegisterBlock {
+        unsafe { &*pac::Lptim1::ptr() }
     }
 
     #[inline]
@@ -428,7 +428,7 @@ impl sealed::Instance for peripherals::LPTIMER1 {
 
     #[inline]
     fn nv_interrupt() -> pac::Interrupt {
-        pac::Interrupt::LPTIMER1
+        pac::Interrupt::LPTIM1
     }
 
     const INDEX: usize = 1;
@@ -437,7 +437,7 @@ impl sealed::Instance for peripherals::LPTIMER1 {
         unsafe { pac::Rcc::steal() }
             .sr1()
             .read()
-            .lptimer1_clk_en_sync()
+            .lptim1_clk_en_sync()
             .bit_is_set()
     }
 
@@ -445,7 +445,7 @@ impl sealed::Instance for peripherals::LPTIMER1 {
         critical_section::with(|_| {
             unsafe { pac::Rcc::steal() }
                 .cgr1()
-                .modify(|_, w| w.lptimer1_clk_en().bit(enable));
+                .modify(|_, w| w.lptim1_clk_en().bit(enable));
         });
     }
 
@@ -453,22 +453,22 @@ impl sealed::Instance for peripherals::LPTIMER1 {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.cr1().modify(|_, w| match source {
-                ClockSource::ExtClk => w.lptimer1_extclk_sel().set_bit(),
+                ClockSource::ExtClk => w.lptim1_ext_clk_sel().set_bit(),
                 ClockSource::Pclk0 => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().pclk0()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    w.lptim1_clk_sel().pclk0()
                 }
                 ClockSource::Rco4m => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().rco4m()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    w.lptim1_clk_sel().rco4m()
                 }
                 ClockSource::Xo32k => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().xo32k()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    w.lptim1_clk_sel().xo32k()
                 }
                 ClockSource::Rco32k => {
-                    w.lptimer1_extclk_sel().clear_bit();
-                    w.lptimer1_clk_sel().rco32k()
+                    w.lptim1_ext_clk_sel().clear_bit();
+                    w.lptim1_clk_sel().rco32k()
                 }
             });
         });
@@ -476,7 +476,7 @@ impl sealed::Instance for peripherals::LPTIMER1 {
 }
 
 impl Instance for peripherals::LPTIMER1 {
-    type Interrupt = interrupt::typelevel::LPTIMER1;
+    type Interrupt = interrupt::typelevel::LPTIM1;
 }
 
 /// Interrupt handler for one LPTIMER instance.
@@ -819,7 +819,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     #[inline]
-    fn regs(&self) -> &'static pac::lptimer0::RegisterBlock {
+    fn regs(&self) -> &'static pac::lptim0::RegisterBlock {
         T::regs()
     }
 }

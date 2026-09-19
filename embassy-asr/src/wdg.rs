@@ -75,8 +75,8 @@ impl<'d> Watchdog<'d> {
     }
 
     #[inline]
-    fn regs() -> pac::Wdg {
-        unsafe { pac::Wdg::steal() }
+    fn regs() -> pac::Wwdg {
+        unsafe { pac::Wwdg::steal() }
     }
 }
 
