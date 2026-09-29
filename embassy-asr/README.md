@@ -31,8 +31,8 @@ The driver:
 - enables the `LPTIMER0` interrupt at NVIC priority 2.
 
 Register programming follows vendor `tremo_lptimer` / `tremo_rcc` and the SDK
-`lptimer_wakeup_stop` example. PAC is `Rimpampa/ASR6601-PAC@svd` (official
-`tremo.svd` v1.6.2).
+`lptimer_wakeup_stop` example. PAC is the official `asr6601-pac` 0.1.0 from
+crates.io (verified against official `tremo.svd` v1.6.2).
 
 ## RTC time driver (deprecated)
 
