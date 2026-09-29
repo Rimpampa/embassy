@@ -39,6 +39,14 @@ const SR_SLAVE_ADDR_DET: u32 = 1 << 23;
 const SR_SLAVE_STOP_DET: u32 = 1 << 24;
 const SR_ERROR_MASK: u32 = SR_ARB_LOSS | SR_BUS_ERROR;
 
+/// Bounded poll budget for the blocking master waits below.
+///
+/// A byte at 100 kHz takes ~90 us (~2k HCLK cycles); this budget is ~1000x
+/// that, so healthy transfers always complete while a wedged bus (SCL held
+/// low, no error flags) fails fast with [`Error::Timeout`] instead of
+/// spinning forever inside an executor task.
+const BLOCKING_POLL_LIMIT: u32 = 1_000_000;
+
 const CR_INTR_MASK: u32 = (1 << 18) // arb loss
     | (1 << 19) // idbr empty
     | (1 << 20) // dbr full
@@ -553,7 +561,7 @@ impl<'d, M: Mode> I2c<'d, M> {
 
     fn blocking_wait_tx_empty(&self) -> Result<(), Error> {
         let regs = self.regs();
-        loop {
+        for _ in 0..BLOCKING_POLL_LIMIT {
             check_errors(regs)?;
             if regs.sr().read().idbr_empty().bit_is_set() {
                 clear_sr(regs, SR_IDBR_EMPTY);
@@ -562,18 +570,22 @@ impl<'d, M: Mode> I2c<'d, M> {
                 }
                 return Ok(());
             }
+            core::hint::spin_loop();
         }
+        Err(self.finish_error(Error::Timeout))
     }
 
     fn blocking_wait_rx_full(&self) -> Result<(), Error> {
         let regs = self.regs();
-        loop {
+        for _ in 0..BLOCKING_POLL_LIMIT {
             check_errors(regs)?;
             if regs.sr().read().dbr_full().bit_is_set() {
                 clear_sr(regs, SR_DBR_FULL);
                 return Ok(());
             }
+            core::hint::spin_loop();
         }
+        Err(self.finish_error(Error::Timeout))
     }
 
     fn blocking_write_ops(&mut self, addr: u8, bytes: &[u8], send_stop: bool) -> Result<(), Error> {
