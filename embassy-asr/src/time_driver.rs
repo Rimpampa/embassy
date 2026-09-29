@@ -27,7 +27,7 @@ const TIMER_TICK_HZ: u64 = 32_768;
 const ARR_MAX: u16 = 0xFFFF;
 
 // Vendor `tremo_lptimer.h` bit definitions (also in RM). ISR/CSR have proper
-// PAC accessors in Rimpampa/ASR6601-PAC@svd; IER/ICR/ARR/CMP/CNT/SR1 are raw.
+// PAC accessors in official `asr6601-pac` 0.1.0; IER/ICR/ARR/CMP/CNT/SR1 are raw.
 const ISR_CMPM: u32 = 1 << 0;
 const ISR_ARRM: u32 = 1 << 1;
 const ISR_CMPOK: u32 = 1 << 3;
