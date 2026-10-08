@@ -394,6 +394,7 @@ impl Default for Config {
 /// Configuration error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum ConfigError {
     /// Baud rate cannot be represented for the selected LPUART clock.
     Baudrate,
@@ -408,6 +409,7 @@ pub enum ConfigError {
 /// LPUART transfer / framing error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// RX overflow (`LPUART_SR0_RX_OVERFLOW_STATE`).
     Overrun,

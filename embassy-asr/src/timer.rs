@@ -69,6 +69,7 @@ static PENDING: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 /// TIMER driver error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Requested frequency cannot be represented with 16-bit PSC/ARR.
     InvalidFrequency,
@@ -162,6 +163,7 @@ impl TimerChannel for Ch3 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum ClockDivision {
     Div1 = 0x0,
     Div2 = 0x100,
@@ -171,6 +173,7 @@ pub enum ClockDivision {
 /// PWM output compare mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum PwmMode {
     /// PWM mode 1.
     Mode1,
@@ -249,6 +252,7 @@ impl core::ops::BitOrAssign for InterruptFlags {
 /// Basic up-counter configuration (vendor `timer_init_t`, up mode only).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Prescaler loaded into `PSC` (`0..=0xFFFF`).
     pub prescaler: u16,
@@ -281,6 +285,7 @@ impl Default for Config {
 /// PWM configuration shared by all channels of one timer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct PwmConfig {
     /// Output compare mode.
     pub mode: PwmMode,

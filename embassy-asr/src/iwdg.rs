@@ -24,6 +24,7 @@ const RCC_RST_CR_IWDG_RESET_REQ_EN: u32 = 1 << 5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum Prescaler {
     Div4 = 0x00,
     Div8 = 0x02,
@@ -37,6 +38,7 @@ pub enum Prescaler {
 /// Independent-watchdog configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Clock prescaler.
     pub prescaler: Prescaler,

@@ -47,6 +47,7 @@ static PWR_INTERRUPT_OBSERVED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum DeepSleepMode {
     /// SDK `PWR_LP_MODE_STOP0`.
     Stop0 = 0,

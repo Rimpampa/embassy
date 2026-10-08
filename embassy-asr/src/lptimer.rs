@@ -59,6 +59,7 @@ static PENDING: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
 /// LPTIMER driver error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// A bounded wait for a status bit expired.
     Timeout(TimeoutTarget),
@@ -69,6 +70,7 @@ pub enum Error {
 /// Status bit that failed to become ready within the poll budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum TimeoutTarget {
     /// `ISR.CFGROK` after a CFGR write.
     Cfgrok,
@@ -294,6 +296,7 @@ impl core::ops::BitOrAssign for WakeupFlags {
 /// LPTIMER initialization configuration (vendor `lptimer_init_t` plus RCC source).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Kernel clock selected in `RCC.CR1`.
     pub clock_source: ClockSource,

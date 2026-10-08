@@ -22,6 +22,7 @@ const PROTECT_SEQ1: u32 = 0x1314_1516;
 /// Flash driver error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Address is outside the main flash array or misaligned.
     Address,
@@ -30,6 +31,18 @@ pub enum Error {
     /// Flash security policy rejected the operation.
     Security,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Address => f.write_str("flash address out of range or misaligned"),
+            Self::Length => f.write_str("invalid flash operation length"),
+            Self::Security => f.write_str("flash operation rejected by security policy"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 impl NorFlashError for Error {
     fn kind(&self) -> NorFlashErrorKind {

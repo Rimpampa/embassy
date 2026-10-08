@@ -223,7 +223,8 @@ embassy_hal_internal::peripherals! {
 
 /// Global HAL configuration.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// Oscillator and core/bus clock configuration.
     pub rcc: rcc::Config,

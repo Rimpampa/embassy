@@ -28,6 +28,7 @@ static UPDATE_PENDING: [AtomicBool; INSTANCE_COUNT] = [const { AtomicBool::new(f
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum MasterMode {
     /// `EGR.UG` is used as the trigger output.
     Reset = 0x00,
@@ -40,6 +41,7 @@ pub enum MasterMode {
 /// BSTIMER configuration matching `bstimer_init_t`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Prescaler loaded into `PSC` (`0..=0xFFFF`). Counter clock is
     /// `timer_clk / (prescaler + 1)`.

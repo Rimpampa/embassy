@@ -341,6 +341,7 @@ impl Calibration {
 /// ADC configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Kernel clock source. SDK examples use [`ClockSource::Rco48m`].
     pub clock_source: ClockSource,
@@ -377,6 +378,7 @@ impl Default for Config {
 /// ADC driver error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Sequence was empty or longer than [`MAX_SEQUENCE_LEN`].
     InvalidSequence,
@@ -391,6 +393,21 @@ pub enum Error {
     /// Continuous conversion is not running.
     NotRunning,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidSequence => f.write_str("invalid ADC sequence"),
+            Self::InvalidClockDivision => f.write_str("invalid ADC clock division"),
+            Self::InvalidDifferentialChannel => f.write_str("invalid differential channel"),
+            Self::Overrun => f.write_str("ADC overrun"),
+            Self::Busy => f.write_str("ADC conversion already running"),
+            Self::NotRunning => f.write_str("ADC conversion not running"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// Owned ASR6601 ADC.
 pub struct Adc<'d, M: Mode = Blocking> {

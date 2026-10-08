@@ -17,6 +17,7 @@ const DATACKERR: u32 = 1 << 1;
 /// RNG configuration reconstructed from the vendor crypto headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Clock divider field written to `RNGCLK` bits `[6:0]`.
     pub divider: u8,
@@ -43,10 +44,21 @@ impl Default for Config {
 /// RNG error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Vendor `DATACKERR` status bit was set.
     ClockError,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ClockError => f.write_str("RNG clock error"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// Owned RNG peripheral.
 pub struct Rng<'d> {

@@ -311,6 +311,7 @@ impl Default for Config {
 /// Configuration error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum ConfigError {
     /// Baud rate cannot be represented for the active UART clock.
     Baudrate,
@@ -327,6 +328,7 @@ pub enum ConfigError {
 /// UART transfer / framing error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// RX FIFO overrun.
     Overrun,

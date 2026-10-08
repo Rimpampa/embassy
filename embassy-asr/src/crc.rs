@@ -15,6 +15,7 @@ const CR_REVERSE_OUT: u32 = 1 << 0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum PolySize {
     /// 32-bit polynomial.
     Bits32 = 0x00,
@@ -30,6 +31,7 @@ pub enum PolySize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum ReverseIn {
     /// Do not reverse input bits.
     None = 0x00,
@@ -44,6 +46,7 @@ pub enum ReverseIn {
 /// CRC configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Initial CRC value written to INIT before calculation.
     pub init_value: u32,

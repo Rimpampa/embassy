@@ -177,10 +177,21 @@ impl AlternateFunction {
 /// Error returned when a pin cannot be a stop-3 wake source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Stop3WakeError {
     /// PD8..PD15 are not stop-3 wake sources.
     UnsupportedPin,
 }
+
+impl core::fmt::Display for Stop3WakeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnsupportedPin => f.write_str("pin is not a stop-3 wake source"),
+        }
+    }
+}
+
+impl core::error::Error for Stop3WakeError {}
 
 trait SealedPin {
     fn id(&self) -> u8;
