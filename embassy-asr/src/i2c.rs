@@ -1,8 +1,24 @@
 //! I2C0–I2C2 driver for the ASR6601 (Marvell-style TWSI).
 //!
 //! Register programming follows the vendor `tremo_i2c` driver and the I2C
-//! examples under `projects/*/examples/i2c`. Transfers use the non-FIFO
-//! byte path (`DBR` + `CR.TRANS_BYTE`), which is the SDK default.
+//! examples under `projects/*/examples/i2c`. All modes use the non-FIFO byte
+//! path (`DBR` + `CR.TRANS_BYTE`), which is the SDK default. Async master
+//! waits per byte on `IDBR_EMPTY` / `DBR_FULL` interrupts and sleeps (WFE)
+//! between them; blocking master and both slave modes poll the same flags
+//! with a bounded poll budget (`BLOCKING_POLL_LIMIT`) so a wedged bus fails
+//! with [`Error::Timeout`] instead of spinning forever.
+//!
+//! The FIFO engine (`WFIFO`/`RFIFO` + `CR.TRANS_BEGIN` + `SR.TRANS_DONE`) is
+//! deliberately not used, although it would cut IRQ wakes to ~one per
+//! transaction. Plausible chip quirk, observed on hardware: in FIFO mode a
+//! slave NACK does not reliably set `BED`, and the engine can then halt with
+//! entries stranded in the WFIFO, `UNIT_BUSY` latched and `TRANS_DONE` never
+//! coming — a state no flag combination resolves except a full bus recovery.
+//! The byte path reports the same event promptly via `BED`/`ACK_STATUS` and
+//! leaves no engine state behind, so subsequent transactions start clean by
+//! construction. DMA is not used either (RM §15.8/15.12): it only replaces
+//! the FIFO feed mechanism while the NACK handling stays identical, so it
+//! cannot help here.
 //!
 //! Alternate-function numbers come from datasheet Table 4-3 (Fun=3 for every
 //! documented I2C remap). Constructors either take typed pins that encode that
