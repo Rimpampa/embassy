@@ -1313,18 +1313,13 @@ impl<'d> embedded_hal_async::i2c::I2c<embedded_hal::i2c::SevenBitAddress> for I2
 
 // --- Instance / pins -------------------------------------------------------
 
-mod sealed {
-    use super::Info;
-
-    #[allow(private_interfaces)]
-    pub trait Instance {
-        fn info() -> &'static Info;
-    }
+trait SealedInstance {
+    fn info() -> &'static Info;
 }
 
 /// I2C instance (I2C0–I2C2).
 #[allow(private_bounds, private_interfaces)]
-pub trait Instance: sealed::Instance + PeripheralType + 'static {
+pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
     /// NVIC vector for this I2C.
     type Interrupt: TypelevelInterrupt;
 }
@@ -1332,7 +1327,7 @@ pub trait Instance: sealed::Instance + PeripheralType + 'static {
 macro_rules! impl_i2c {
     ($peri:ident, $interrupt:ident, $base:expr, $rcc:ident, $pclk:ident, $state:ident) => {
         #[allow(private_interfaces)]
-        impl sealed::Instance for peripherals::$peri {
+        impl SealedInstance for peripherals::$peri {
             fn info() -> &'static Info {
                 static INFO: Info = Info {
                     regs: $base as *const RegisterBlock,

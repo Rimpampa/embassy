@@ -1173,18 +1173,13 @@ impl<'d> embedded_io_async::Read for Uart<'d, Async> {
 
 // --- Instance --------------------------------------------------------------
 
-mod sealed {
-    use super::Info;
-
-    #[allow(private_interfaces)]
-    pub trait Instance {
-        fn info() -> &'static Info;
-    }
+trait SealedInstance {
+    fn info() -> &'static Info;
 }
 
 /// UART instance (UART0–UART3).
 #[allow(private_bounds, private_interfaces)]
-pub trait Instance: sealed::Instance + PeripheralType + 'static {
+pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
     /// NVIC vector for this UART.
     type Interrupt: Interrupt;
 }
@@ -1192,7 +1187,7 @@ pub trait Instance: sealed::Instance + PeripheralType + 'static {
 macro_rules! impl_uart {
     ($peri:ident, $interrupt:ident, $index:expr, $base:expr, $rcc:ident, $pclk0:expr, $dma_tx:ident, $dma_rx:ident) => {
         #[allow(private_interfaces)]
-        impl sealed::Instance for peripherals::$peri {
+        impl SealedInstance for peripherals::$peri {
             fn info() -> &'static Info {
                 static INFO: Info = Info {
                     index: $index,

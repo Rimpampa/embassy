@@ -182,15 +182,13 @@ pub enum Stop3WakeError {
     UnsupportedPin,
 }
 
-mod sealed {
-    pub trait Pin {
-        fn id(&self) -> u8;
-    }
+trait SealedPin {
+    fn id(&self) -> u8;
 }
 
 /// A GPIO pin singleton that can be used by this driver.
 #[allow(private_bounds)]
-pub trait Pin: PeripheralType + Into<AnyPin> + sealed::Pin + Sized + 'static {
+pub trait Pin: PeripheralType + Into<AnyPin> + SealedPin + Sized + 'static {
     /// Return the GPIO port.
     #[inline]
     fn port(&self) -> Port {
@@ -230,7 +228,7 @@ impl AnyPin {
 
 impl_peripheral!(AnyPin);
 
-impl sealed::Pin for AnyPin {
+impl SealedPin for AnyPin {
     #[inline]
     fn id(&self) -> u8 {
         self.id
@@ -241,7 +239,7 @@ impl Pin for AnyPin {}
 
 macro_rules! impl_pin {
     ($name:ident, $port:expr, $pin:expr) => {
-        impl sealed::Pin for peripherals::$name {
+        impl SealedPin for peripherals::$name {
             #[inline]
             fn id(&self) -> u8 {
                 $port as u8 * PINS_PER_PORT as u8 + $pin

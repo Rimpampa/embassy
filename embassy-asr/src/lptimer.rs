@@ -326,32 +326,28 @@ impl Default for Config {
     }
 }
 
-mod sealed {
-    use super::*;
+trait SealedInstance {
+    fn regs() -> &'static pac::lptim0::RegisterBlock;
+    fn rcc_peripheral() -> RccPeripheral;
+    fn nv_interrupt() -> pac::Interrupt;
+    const INDEX: usize;
+    fn clock_source_sync() -> bool;
+    fn gate_functional_clock(enable: bool);
+    fn set_clock_source(source: ClockSource);
+}
 
-    pub trait Instance {
-        fn regs() -> &'static pac::lptim0::RegisterBlock;
-        fn rcc_peripheral() -> RccPeripheral;
-        fn nv_interrupt() -> pac::Interrupt;
-        const INDEX: usize;
-        fn clock_source_sync() -> bool;
-        fn gate_functional_clock(enable: bool);
-        fn set_clock_source(source: ClockSource);
-    }
-
-    pub trait AfPin {
-        const AF: AlternateFunction;
-    }
+trait SealedAfPin {
+    const AF: AlternateFunction;
 }
 
 /// LPTIMER peripheral instance.
 #[allow(private_bounds)]
-pub trait Instance: sealed::Instance + PeripheralType + 'static {
+pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
     /// NVIC vector for this instance.
     type Interrupt: TypelevelInterrupt;
 }
 
-impl sealed::Instance for peripherals::LPTIMER0 {
+impl SealedInstance for peripherals::LPTIMER0 {
     #[inline]
     fn regs() -> &'static pac::lptim0::RegisterBlock {
         unsafe { &*pac::Lptim0::ptr() }
@@ -415,7 +411,7 @@ impl Instance for peripherals::LPTIMER0 {
     type Interrupt = interrupt::typelevel::LPTIM0;
 }
 
-impl sealed::Instance for peripherals::LPTIMER1 {
+impl SealedInstance for peripherals::LPTIMER1 {
     #[inline]
     fn regs() -> &'static pac::lptim0::RegisterBlock {
         unsafe { &*pac::Lptim1::ptr() }
@@ -835,7 +831,7 @@ impl<'d, T: Instance> Drop for LpTimer<'d, T> {
 
 fn configure_af<'d, P>(pin: Peri<'d, P>) -> Flex<'d>
 where
-    P: gpio::Pin + sealed::AfPin,
+    P: gpio::Pin + SealedAfPin,
 {
     let af = P::AF;
     let mut flex = Flex::new(pin);
@@ -898,15 +894,15 @@ fn set_instance_clock_source<T: Instance>(source: ClockSource) -> Result<(), Err
 }
 
 /// Documented LPTIMER `IN1` pin for an instance.
-pub trait In1Pin<T: Instance>: gpio::Pin + sealed::AfPin {}
+pub trait In1Pin<T: Instance>: gpio::Pin + SealedAfPin {}
 /// Documented LPTIMER `IN2` pin for an instance.
-pub trait In2Pin<T: Instance>: gpio::Pin + sealed::AfPin {}
+pub trait In2Pin<T: Instance>: gpio::Pin + SealedAfPin {}
 /// Documented LPTIMER `ETR` pin for an instance.
-pub trait EtrPin<T: Instance>: gpio::Pin + sealed::AfPin {}
+pub trait EtrPin<T: Instance>: gpio::Pin + SealedAfPin {}
 
 macro_rules! impl_lptimer0_pin {
     ($trait:ident, $pin:ident, $af:ident) => {
-        impl sealed::AfPin for peripherals::$pin {
+        impl SealedAfPin for peripherals::$pin {
             const AF: AlternateFunction = AlternateFunction::$af;
         }
         impl $trait<peripherals::LPTIMER0> for peripherals::$pin {}

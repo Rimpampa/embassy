@@ -416,28 +416,26 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
-mod word_sealed {
-    pub trait Sealed {}
-}
+trait SealedWord {}
 
 /// A type that can be transferred by the DMA.
 #[allow(private_bounds)]
-pub trait Word: word_sealed::Sealed + Copy + 'static {
+pub trait Word: SealedWord + Copy + 'static {
     /// DMA width for this type.
     const WIDTH: DataWidth;
 }
 
-impl word_sealed::Sealed for u8 {}
+impl SealedWord for u8 {}
 impl Word for u8 {
     const WIDTH: DataWidth = DataWidth::Bits8;
 }
 
-impl word_sealed::Sealed for u16 {}
+impl SealedWord for u16 {}
 impl Word for u16 {
     const WIDTH: DataWidth = DataWidth::Bits16;
 }
 
-impl word_sealed::Sealed for u32 {}
+impl SealedWord for u32 {}
 impl Word for u32 {
     const WIDTH: DataWidth = DataWidth::Bits32;
 }
@@ -522,14 +520,13 @@ impl ChannelState {
 
 static STATE: [ChannelState; CHANNEL_COUNT] = [const { ChannelState::new() }; CHANNEL_COUNT];
 
-mod sealed {
-    pub trait ControllerInstance {}
-    pub trait ChannelInstance {}
-}
+trait SealedControllerInstance {}
+
+trait SealedChannelInstance {}
 
 /// DMA controller instance.
 #[allow(private_bounds)]
-pub trait ControllerInstance: sealed::ControllerInstance + PeripheralType + 'static {
+pub trait ControllerInstance: SealedControllerInstance + PeripheralType + 'static + Send {
     /// Shared interrupt for this controller.
     type Interrupt: TypelevelInterrupt;
 
@@ -539,7 +536,7 @@ pub trait ControllerInstance: sealed::ControllerInstance + PeripheralType + 'sta
 
 /// DMA channel singleton instance.
 #[allow(private_bounds)]
-pub trait ChannelInstance: sealed::ChannelInstance + PeripheralType + 'static {
+pub trait ChannelInstance: SealedChannelInstance + PeripheralType + 'static + Send {
     /// DMA controller containing this channel.
     type Controller: ControllerInstance;
 
@@ -1462,7 +1459,7 @@ pub(crate) unsafe fn init() {
 
 macro_rules! controller {
     ($name:ident, $number:expr, $interrupt:ident) => {
-        impl sealed::ControllerInstance for peripherals::$name {}
+        impl SealedControllerInstance for peripherals::$name {}
 
         impl ControllerInstance for peripherals::$name {
             type Interrupt = interrupt::typelevel::$interrupt;
@@ -1473,7 +1470,7 @@ macro_rules! controller {
 
 macro_rules! channel {
     ($name:ident, $controller:ident, $number:expr) => {
-        impl sealed::ChannelInstance for peripherals::$name {}
+        impl SealedChannelInstance for peripherals::$name {}
 
         impl ChannelInstance for peripherals::$name {
             type Controller = peripherals::$controller;

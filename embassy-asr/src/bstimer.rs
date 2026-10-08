@@ -70,28 +70,23 @@ impl Default for Config {
     }
 }
 
-mod sealed {
-    use crate::pac::bstim0::RegisterBlock;
-    use crate::rcc::Peripheral;
-
-    pub trait Instance {
-        fn regs() -> &'static RegisterBlock;
-        fn peripheral() -> Peripheral;
-        fn number() -> usize;
-        fn sr_ptr() -> *mut u32;
-    }
+trait SealedInstance {
+    fn regs() -> &'static pac::bstim0::RegisterBlock;
+    fn peripheral() -> Peripheral;
+    fn number() -> usize;
+    fn sr_ptr() -> *mut u32;
 }
 
 /// BSTIMER peripheral instance.
 #[allow(private_bounds)]
-pub trait Instance: sealed::Instance + PeripheralType + 'static {
+pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
     /// Update interrupt for this timer.
     type Interrupt: TypelevelInterrupt;
 }
 
 macro_rules! impl_instance {
     ($name:ident, $pac:ident, $interrupt:ident, $peripheral:ident, $number:expr, $base:expr) => {
-        impl sealed::Instance for peripherals::$name {
+        impl SealedInstance for peripherals::$name {
             #[inline]
             fn regs() -> &'static pac::bstim0::RegisterBlock {
                 unsafe { &*pac::$pac::PTR }

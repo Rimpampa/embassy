@@ -234,13 +234,17 @@ impl From<SampleChannel> for RawSampleChannel {
 }
 
 /// Pins that map to a documented ADC input.
-pub trait AdcPin: Pin {
+#[allow(private_bounds)]
+pub trait AdcPin: Pin + SealedAdcPin {
     /// Documented sample channel for this pin.
     const CHANNEL: SampleChannel;
 }
 
+trait SealedAdcPin {}
+
 macro_rules! impl_adc_pin {
     ($pin:ident, $channel:expr) => {
+        impl SealedAdcPin for peripherals::$pin {}
         impl AdcPin for peripherals::$pin {
             const CHANNEL: SampleChannel = $channel;
         }
