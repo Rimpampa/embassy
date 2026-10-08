@@ -175,6 +175,7 @@ impl PclkDivider {
 /// RCC initialization configuration.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// System clock source.
     pub system_clock: SystemClockSource,
