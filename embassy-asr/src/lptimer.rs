@@ -124,13 +124,21 @@ pub enum ClockSource {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
 pub enum Prescaler {
+    /// No prescaling.
     Div1 = 0x0,
+    /// Divide the counter clock by 2.
     Div2 = 0x200,
+    /// Divide the counter clock by 4.
     Div4 = 0x400,
+    /// Divide the counter clock by 8.
     Div8 = 0x600,
+    /// Divide the counter clock by 16.
     Div16 = 0x800,
+    /// Divide the counter clock by 32.
     Div32 = 0xa00,
+    /// Divide the counter clock by 64.
     Div64 = 0xc00,
+    /// Divide the counter clock by 128.
     Div128 = 0xe00,
 }
 
@@ -141,8 +149,11 @@ pub enum Prescaler {
 pub enum TriggerPolarity {
     /// Software / no edge trigger.
     Software = 0x0,
+    /// Clock on rising edge.
     Rising = 0x20000,
+    /// Clock on falling edge.
     Falling = 0x40000,
+    /// Trigger on either edge.
     RisingFalling = 0x60000,
 }
 
@@ -153,12 +164,19 @@ pub enum TriggerPolarity {
 pub enum TriggerSource {
     /// External trigger ETR pin.
     Etr = 0x0,
+    /// Analog comparator 0 output.
     Comp0 = 0x2000,
+    /// Analog comparator 1 output.
     Comp1 = 0x4000,
+    /// RTC cycle tick.
     RtcCyc = 0x6000,
+    /// RTC alarm 0.
     RtcAlarm0 = 0x8000,
+    /// RTC alarm 1.
     RtcAlarm1 = 0xa000,
+    /// GPIO trigger input 0.
     Gpio0 = 0xc000,
+    /// GPIO trigger input 1.
     Gpio1 = 0xe000,
 }
 
@@ -167,9 +185,13 @@ pub enum TriggerSource {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
 pub enum TriggerFilter {
+    /// No digital filtering.
     None = 0x0,
+    /// Digital filter over 2 clock cycles.
     Cycles2 = 0x40,
+    /// Digital filter over 4 clock cycles.
     Cycles4 = 0x80,
+    /// Digital filter over 8 clock cycles.
     Cycles8 = 0xc0,
 }
 
@@ -178,9 +200,13 @@ pub enum TriggerFilter {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
 pub enum ClockFilter {
+    /// No digital filtering.
     None = 0x0,
+    /// Digital filter over 2 clock cycles.
     Cycles2 = 0x8,
+    /// Digital filter over 4 clock cycles.
     Cycles4 = 0x10,
+    /// Digital filter over 8 clock cycles.
     Cycles8 = 0x18,
 }
 
@@ -189,8 +215,11 @@ pub enum ClockFilter {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
 pub enum ClockPolarity {
+    /// Clock on rising edge.
     Rising = 0x0,
+    /// Clock on falling edge.
     Falling = 0x2,
+    /// Clock on both edges.
     Both = 0x4,
 }
 
@@ -210,29 +239,40 @@ pub enum CountMode {
 pub struct InterruptFlags(u32);
 
 impl InterruptFlags {
+    /// Compare match.
     pub const CMPM: Self = Self(ISR_CMPM);
+    /// Autoreload match (overflow).
     pub const ARRM: Self = Self(ISR_ARRM);
+    /// External trigger event.
     pub const EXTTRIG: Self = Self(ISR_EXTTRIG);
+    /// Compare register write completed.
     pub const CMPOK: Self = Self(ISR_CMPOK);
+    /// Autoreload register write completed.
     pub const ARROK: Self = Self(ISR_ARROK);
+    /// Counter direction changed to up.
     pub const UP: Self = Self(ISR_UP);
+    /// Counter direction changed to down.
     pub const DOWN: Self = Self(ISR_DOWN);
 
     /// Empty set.
+    /// Empty flag set.
     pub const fn empty() -> Self {
         Self(0)
     }
 
+    /// Combine flag sets.
     /// Combine flag sets.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
     /// Bits used by the vendor interrupt API (excludes CFGROK/CROK).
+    /// Raw flag bits.
     pub const fn bits(self) -> u32 {
         self.0 & IT_MASK
     }
 
+    /// Whether every bit in `other` is present.
     /// Whether every bit in `other` is present.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -259,21 +299,35 @@ impl core::ops::BitOrAssign for InterruptFlags {
 pub struct WakeupFlags(u32);
 
 impl WakeupFlags {
+    /// Compare match.
+    /// Wake on compare match.
     pub const CMPM: Self = Self(1 << 25);
+    /// Autoreload match (overflow).
+    /// Wake on autoreload match (overflow).
     pub const ARRM: Self = Self(1 << 26);
+    /// External trigger event.
+    /// Wake on external trigger.
     pub const EXTTRIG: Self = Self(1 << 27);
+    /// Counter direction changed to up.
+    /// Wake on counter direction change to up.
     pub const UP: Self = Self(1 << 28);
+    /// Counter direction changed to down.
+    /// Wake on counter direction change to down.
     pub const DOWN: Self = Self(1 << 29);
+    /// Wake on timer output edge.
     pub const OUT: Self = Self(1 << 30);
 
+    /// Empty flag set.
     pub const fn empty() -> Self {
         Self(0)
     }
 
+    /// Combine flag sets.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// Raw flag bits.
     pub const fn bits(self) -> u32 {
         self.0 & WKUP_MASK
     }

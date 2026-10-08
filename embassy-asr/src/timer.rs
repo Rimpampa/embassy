@@ -102,9 +102,13 @@ impl core::error::Error for Error {}
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum Channel {
+    /// Capture/compare channel 0.
     Ch0 = 0,
+    /// Capture/compare channel 1.
     Ch1 = 1,
+    /// Capture/compare channel 2.
     Ch2 = 2,
+    /// Capture/compare channel 3.
     Ch3 = 3,
 }
 
@@ -165,8 +169,11 @@ impl TimerChannel for Ch3 {
 #[repr(u32)]
 #[non_exhaustive]
 pub enum ClockDivision {
+    /// No prescaling.
     Div1 = 0x0,
+    /// Divide the timer clock by 2.
     Div2 = 0x100,
+    /// Divide the timer clock by 4.
     Div4 = 0x200,
 }
 
@@ -195,8 +202,11 @@ pub enum OutputPolarity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum CapturePolarity {
+    /// Capture on  rising edge.
     Rising,
+    /// Capture on  falling edge.
     Falling,
+    /// Capture on a both edges.
     Both,
 }
 
@@ -206,25 +216,36 @@ pub enum CapturePolarity {
 pub struct InterruptFlags(u32);
 
 impl InterruptFlags {
+    /// Counter overflow/underflow update event.
     pub const UPDATE: Self = Self(1 << 0);
+    /// Capture/compare channel 0 event.
     pub const CC0: Self = Self(1 << 1);
+    /// Capture/compare channel 1 event.
     pub const CC1: Self = Self(1 << 2);
+    /// Capture/compare channel 2 event.
     pub const CC2: Self = Self(1 << 3);
+    /// Capture/compare channel 3 event.
     pub const CC3: Self = Self(1 << 4);
+    /// Trigger input event.
     pub const TRIGGER: Self = Self(1 << 6);
 
+    /// Empty flag set.
     pub const fn empty() -> Self {
         Self(0)
     }
 
+    /// Combine flag sets.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// Raw flag bits.
     pub const fn bits(self) -> u32 {
         self.0 & SR_IT_MASK
     }
 
+    /// Whether every bit in `other` is present.
+    /// Whether every bit in `other` is present.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }

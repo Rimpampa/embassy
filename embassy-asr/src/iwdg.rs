@@ -26,12 +26,19 @@ const RCC_RST_CR_IWDG_RESET_REQ_EN: u32 = 1 << 5;
 #[repr(u32)]
 #[non_exhaustive]
 pub enum Prescaler {
+    /// Divide the watchdog clock by 4.
     Div4 = 0x00,
+    /// Divide the watchdog clock by 8.
     Div8 = 0x02,
+    /// Divide the watchdog clock by 16.
     Div16 = 0x04,
+    /// Divide the watchdog clock by 32.
     Div32 = 0x06,
+    /// Divide the watchdog clock by 64.
     Div64 = 0x08,
+    /// Divide the watchdog clock by 128.
     Div128 = 0x0a,
+    /// Divide the watchdog clock by 256.
     Div256 = 0x0c,
 }
 

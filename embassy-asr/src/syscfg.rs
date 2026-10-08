@@ -33,9 +33,13 @@ pub enum DmaController {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum DmaChannel {
+    /// DMA channel 0.
     Channel0,
+    /// DMA channel 1.
     Channel1,
+    /// DMA channel 2.
     Channel2,
+    /// DMA channel 3.
     Channel3,
 }
 
@@ -61,54 +65,103 @@ impl DmaChannel {
 #[repr(u8)]
 #[non_exhaustive]
 pub enum DmaRequest {
+    /// LoRa controller transmit DMA request.
     LoracTx = 4,
+    /// LoRa controller receive DMA request.
     LoracRx = 5,
+    /// DAC DMA request.
     Dac = 6,
+    /// ADC DMA request.
     Adc = 7,
+    /// Security coprocessor DMA request.
     Scc = 9,
+    /// I2C2 transmit DMA request.
     I2c2Tx = 10,
+    /// I2C2 receive DMA request.
     I2c2Rx = 11,
+    /// I2C1 transmit DMA request.
     I2c1Tx = 12,
+    /// I2C1 receive DMA request.
     I2c1Rx = 13,
+    /// I2C0 transmit DMA request.
     I2c0Tx = 14,
+    /// I2C0 receive DMA request.
     I2c0Rx = 15,
+    /// SSP2 transmit DMA request.
     Ssp2Tx = 16,
+    /// SSP2 receive DMA request.
     Ssp2Rx = 17,
+    /// SSP1 transmit DMA request.
     Ssp1Tx = 18,
+    /// SSP1 receive DMA request.
     Ssp1Rx = 19,
+    /// SSP0 transmit DMA request.
     Ssp0Tx = 20,
+    /// SSP0 receive DMA request.
     Ssp0Rx = 21,
+    /// LPUART transmit DMA request.
     LpuartTx = 22,
+    /// LPUART receive DMA request.
     LpuartRx = 23,
+    /// UART3 transmit DMA request.
     Uart3Tx = 24,
+    /// UART3 receive DMA request.
     Uart3Rx = 25,
+    /// UART2 transmit DMA request.
     Uart2Tx = 26,
+    /// UART2 receive DMA request.
     Uart2Rx = 27,
+    /// UART1 transmit DMA request.
     Uart1Tx = 28,
+    /// UART1 receive DMA request.
     Uart1Rx = 29,
+    /// UART0 transmit DMA request.
     Uart0Tx = 30,
+    /// UART0 receive DMA request.
     Uart0Rx = 31,
+    /// Timer0 channel 3 DMA request.
     Timer0Channel3 = 32,
+    /// Timer0 channel 2 DMA request.
     Timer0Channel2 = 33,
+    /// Timer0 channel 1 DMA request.
     Timer0Channel1 = 34,
+    /// Timer0 channel 0 DMA request.
     Timer0Channel0 = 35,
+    /// Timer0 trigger DMA request.
     Timer0Trigger = 36,
+    /// Timer0 update DMA request.
     Timer0Update = 37,
+    /// Timer1 channel 3 DMA request.
     Timer1Channel3 = 38,
+    /// Timer1 channel 2 DMA request.
     Timer1Channel2 = 39,
+    /// Timer1 channel 1 DMA request.
     Timer1Channel1 = 40,
+    /// Timer1 channel 0 DMA request.
     Timer1Channel0 = 41,
+    /// Timer1 trigger DMA request.
     Timer1Trigger = 42,
+    /// Timer1 update DMA request.
     Timer1Update = 43,
+    /// Timer2 channel 1 DMA request.
     Timer2Channel1 = 44,
+    /// Timer2 channel 0 DMA request.
     Timer2Channel0 = 45,
+    /// Timer2 trigger DMA request.
     Timer2Trigger = 46,
+    /// Timer2 update DMA request.
     Timer2Update = 47,
+    /// Timer3 channel 1 DMA request.
     Timer3Channel1 = 48,
+    /// Timer3 channel 0 DMA request.
     Timer3Channel0 = 49,
+    /// Timer3 trigger DMA request.
     Timer3Trigger = 50,
+    /// Timer3 update DMA request.
     Timer3Update = 51,
+    /// basic timer 1 update DMA request.
     BasicTimer1Update = 52,
+    /// basic timer 0 update DMA request.
     BasicTimer0Update = 53,
 }
 
@@ -119,10 +172,15 @@ pub enum DmaRequest {
 pub enum I2sWordSize {
     /// The DesignWare I2S "don't care" encoding.
     DontCare,
+    /// 12-bit samples.
     Bits12,
+    /// 16-bit samples.
     Bits16,
+    /// 20-bit samples.
     Bits20,
+    /// 24-bit samples.
     Bits24,
+    /// 32-bit samples.
     Bits32,
 }
 

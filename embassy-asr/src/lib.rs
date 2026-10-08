@@ -1,5 +1,6 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
 
 //! Embassy support for ASR microcontrollers.
 //!
@@ -7,10 +8,12 @@
 //! infrastructure used by ASR peripheral drivers.
 
 #[cfg(feature = "asr6601")]
+/// Peripheral Access Crate re-export for the ASR6601.
 pub mod pac {
     pub use asr6601_pac::*;
     pub use cortex_m_rt::interrupt;
 
+    /// Interrupt enumeration re-export for `bind_interrupts!` users.
     pub mod interrupt {
         pub use asr6601_pac::Interrupt;
         pub use asr6601_pac::Interrupt::*;

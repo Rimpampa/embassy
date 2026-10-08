@@ -486,46 +486,87 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Peripheral {
+    /// Smart access controller.
     Sac,
+    /// Security engine.
     Sec,
+    /// CRC engine.
     Crc,
+    /// Real-time clock.
     Rtc,
+    /// Window watchdog.
     Wdg,
+    /// Independent watchdog.
     Iwdg,
+    /// Low-power timer 0.
     Lptimer0,
+    /// Basic timer 1.
     Bstimer1,
+    /// Basic timer 0.
     Bstimer0,
+    /// General-purpose timer 3.
     Timer3,
+    /// General-purpose timer 2.
     Timer2,
+    /// General-purpose timer 1.
     Timer1,
+    /// General-purpose timer 0.
     Timer0,
+    /// GPIO port A.
     GpioA,
+    /// GPIO port B.
     GpioB,
+    /// GPIO port C.
     GpioC,
+    /// GPIO port D.
     GpioD,
+    /// LoRa controller.
     Lora,
+    /// DAC controller.
     Dac,
+    /// LCD controller.
     Lcd,
+    /// Analog front-end controller.
     Afec,
+    /// ADC controller.
     Adc,
+    /// I2C bus 2.
     I2c2,
+    /// I2C bus 1.
     I2c1,
+    /// I2C bus 0.
     I2c0,
+    /// Quad-SPI controller.
     Qspi,
+    /// Synchronous serial port 2.
     Ssp2,
+    /// Synchronous serial port 1.
     Ssp1,
+    /// Synchronous serial port 0.
     Ssp0,
+    /// Low-power UART.
     Lpuart,
+    /// UART3.
     Uart3,
+    /// UART2.
     Uart2,
+    /// UART1.
     Uart1,
+    /// UART0.
     Uart0,
+    /// DMA controller 1.
     Dma1,
+    /// DMA controller 0.
     Dma0,
+    /// I2S controller.
     I2s,
+    /// Random number generator.
     Rng,
+    /// Low-power timer 1.
     Lptimer1,
+    /// System configuration controller.
     Syscfg,
+    /// Power controller.
     Pwr,
 }
 
