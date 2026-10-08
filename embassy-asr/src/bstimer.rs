@@ -150,7 +150,7 @@ pub struct BsTimer<'d, T: Instance, M: Mode = Blocking> {
 
 impl<'d, T: Instance> BsTimer<'d, T, Blocking> {
     /// Enable clocks, release reset, apply `config`, and leave the timer stopped.
-    pub fn new(peri: Peri<'d, T>, config: Config) -> Self {
+    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Self {
         let this = Self::create(peri);
         this.configure(config);
         this

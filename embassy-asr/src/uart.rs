@@ -594,23 +594,23 @@ pub struct UartRx<'d, M: Mode> {
 impl<'d> Uart<'d, Blocking> {
     /// Create a blocking UART.
     ///
-    /// `rx` / `tx` are `(pin, alternate_function)` pairs. Supply `None` for
+    /// `tx` / `rx` are `(pin, alternate_function)` pairs. Supply `None` for
     /// unused directions. Flow-control pins are not configured here; use
     /// [`Self::new_blocking_with_flow_control`] when RTS/CTS are required.
     pub fn new_blocking<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner::<T>(peri, erase_pin(rx), erase_pin(tx), None, None, config, false)
+        Self::new_inner::<T>(peri, erase_pin(tx), erase_pin(rx), None, None, config, false)
     }
 
     /// Create a blocking UART with explicit RTS/CTS pins and AF selectors.
     pub fn new_blocking_with_flow_control<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
@@ -633,19 +633,19 @@ impl<'d> Uart<'d, Async> {
     /// `irq` proves the UART vector is bound to [`InterruptHandler<T>`].
     pub fn new<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner::<T>(peri, erase_pin(rx), erase_pin(tx), None, None, config, true)
+        Self::new_inner::<T>(peri, erase_pin(tx), erase_pin(rx), None, None, config, true)
     }
 
     /// Create an asynchronous UART with explicit RTS/CTS pins and AF selectors.
     pub fn new_with_flow_control<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
@@ -694,8 +694,8 @@ impl<'d> Uart<'d, Async> {
 impl<'d, M: Mode> Uart<'d, M> {
     fn new_inner<T: Instance>(
         _peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         tx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         rts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         cts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         config: Config,

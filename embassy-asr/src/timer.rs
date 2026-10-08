@@ -707,11 +707,26 @@ pub struct Timer<'d, T: Instance> {
 
 impl<'d, T: Instance> Timer<'d, T> {
     /// Enable clocks, reset the block, apply `config`, and leave the counter stopped.
+    ///
+    /// Does not bind the update interrupt; use [`Self::new`] for
+    /// interrupt-driven use.
+    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+        Self::create(peri, config)
+    }
+
+    /// Enable clocks, reset the block, apply `config`, and leave the counter stopped.
+    ///
+    /// `irq` proves the timer update vector is bound; interrupt-driven
+    /// waits arm it on demand.
     pub fn new(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
+        Self::create(peri, config)
+    }
+
+    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
         enable_instance::<T>()?;
         let this = Self { _peri: peri };
         apply_basic_config::<T>(config);

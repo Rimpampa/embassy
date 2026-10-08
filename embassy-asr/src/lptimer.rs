@@ -577,11 +577,24 @@ pub struct LpTimer<'d, T: Instance> {
 impl<'d, T: Instance> LpTimer<'d, T> {
     /// Reset the block, select `config.clock_source`, enable clocks, and apply
     /// the vendor `lptimer_init` fields. The counter remains disabled.
+    ///
+    /// Does not bind the update interrupt; use [`Self::new`] for
+    /// interrupt-driven use.
+    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+        Self::create(peri, config)
+    }
+
+    /// Reset the block, select `config.clock_source`, enable clocks, and apply
+    /// the vendor `lptimer_init` fields. The counter remains disabled.
     pub fn new(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
+        Self::create(peri, config)
+    }
+
+    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
         // Match the wakeup example: gate functional clock, pulse reset, select
         // source, then re-enable.
         let _ = rcc::disable_peripheral(T::rcc_peripheral());

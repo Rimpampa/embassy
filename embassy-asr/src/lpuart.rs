@@ -685,22 +685,22 @@ pub struct LpuartRx<'d, M: Mode> {
 impl<'d> Lpuart<'d, Blocking> {
     /// Create a blocking LPUART.
     ///
-    /// `rx` / `tx` are `(pin, alternate_function)` pairs. See [`pins`] for the
+    /// `tx` / `rx` are `(pin, alternate_function)` pairs. See [`pins`] for the
     /// datasheet AF numbers. Supply `None` for unused directions.
     pub fn new_blocking(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner(peri, erase_pin(rx), erase_pin(tx), None, None, config, false)
+        Self::new_inner(peri, erase_pin(tx), erase_pin(rx), None, None, config, false)
     }
 
     /// Create a blocking LPUART with explicit RTS/CTS pins and AF selectors.
     pub fn new_blocking_with_flow_control(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
@@ -723,19 +723,19 @@ impl<'d> Lpuart<'d, Async> {
     /// `irq` proves the LPUART vector is bound to [`InterruptHandler`].
     pub fn new(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<interrupt::typelevel::LPUART, InterruptHandler> + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner(peri, erase_pin(rx), erase_pin(tx), None, None, config, true)
+        Self::new_inner(peri, erase_pin(tx), erase_pin(rx), None, None, config, true)
     }
 
     /// Create an asynchronous LPUART with explicit RTS/CTS pins and AF selectors.
     pub fn new_with_flow_control(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<interrupt::typelevel::LPUART, InterruptHandler> + 'd,
@@ -781,8 +781,8 @@ impl<'d> Lpuart<'d, Async> {
 impl<'d, M: Mode> Lpuart<'d, M> {
     fn new_inner(
         _peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         tx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         rts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         cts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         config: Config,
