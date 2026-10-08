@@ -1261,3 +1261,29 @@ impl SealedInstance for peripherals::LPUART {
 impl Instance for peripherals::LPUART {
     type Interrupt = interrupt::typelevel::LPUART;
 }
+
+// --- embedded-hal 0.2 blocking traits ----------------------------------------
+
+impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for Lpuart<'d, M> {
+    type Error = Error;
+
+    fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(buffer)
+    }
+
+    fn bflush(&mut self) -> Result<(), Self::Error> {
+        self.blocking_flush()
+    }
+}
+
+impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for LpuartTx<'d, M> {
+    type Error = Error;
+
+    fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(buffer)
+    }
+
+    fn bflush(&mut self) -> Result<(), Self::Error> {
+        self.blocking_flush()
+    }
+}

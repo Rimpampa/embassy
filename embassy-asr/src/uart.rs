@@ -1214,3 +1214,29 @@ impl_uart!(UART0, UART0, 0, 0x4000_3000, Uart0, true, Uart0Tx, Uart0Rx);
 impl_uart!(UART1, UART1, 1, 0x4000_4000, Uart1, true, Uart1Tx, Uart1Rx);
 impl_uart!(UART2, UART2, 2, 0x4001_0000, Uart2, false, Uart2Tx, Uart2Rx);
 impl_uart!(UART3, UART3, 3, 0x4001_1000, Uart3, false, Uart3Tx, Uart3Rx);
+
+// --- embedded-hal 0.2 blocking traits ----------------------------------------
+
+impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for Uart<'d, M> {
+    type Error = Error;
+
+    fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(buffer)
+    }
+
+    fn bflush(&mut self) -> Result<(), Self::Error> {
+        self.blocking_flush()
+    }
+}
+
+impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for UartTx<'d, M> {
+    type Error = Error;
+
+    fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(buffer)
+    }
+
+    fn bflush(&mut self) -> Result<(), Self::Error> {
+        self.blocking_flush()
+    }
+}

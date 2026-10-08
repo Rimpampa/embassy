@@ -1162,3 +1162,22 @@ impl<'d> embedded_hal_async::spi::SpiBus<u8> for Spi<'d, Async> {
         self.flush_async().await
     }
 }
+
+// --- embedded-hal 0.2 blocking traits ----------------------------------------
+
+impl<'d, M: Mode> embedded_hal_02::blocking::spi::Transfer<u8> for Spi<'d, M> {
+    type Error = Error;
+
+    fn transfer<'w>(&mut self, words: &'w mut [u8]) -> Result<&'w [u8], Self::Error> {
+        self.blocking_transfer_in_place(words)?;
+        Ok(words)
+    }
+}
+
+impl<'d, M: Mode> embedded_hal_02::blocking::spi::Write<u8> for Spi<'d, M> {
+    type Error = Error;
+
+    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(words)
+    }
+}
