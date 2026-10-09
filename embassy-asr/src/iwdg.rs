@@ -7,19 +7,6 @@ use crate::{Peri, pac, peripherals};
 
 const MAX_RELOAD: u32 = 0x0fff;
 
-const CR_RSTEN: u32 = 1 << 5;
-const CR_WKEN: u32 = 1 << 4;
-const CR_PREDIV_MASK: u32 = 0x0e;
-const CR_START: u32 = 1 << 0;
-
-const SR_WRITE_SR2_DONE: u32 = 1 << 3;
-const SR_WRITE_CR_DONE: u32 = 1 << 0;
-const SR_ALL_DONE: u32 = 0x0f;
-
-const CR1_RESET_REQ_INT_EN: u32 = 1 << 0;
-const SR2_RESET_REQ: u32 = 1 << 0;
-const RCC_RST_CR_IWDG_RESET_REQ_EN: u32 = 1 << 5;
-
 /// IWDG clock prescaler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -96,32 +83,30 @@ impl<'d> IndependentWatchdog<'d> {
         let regs = Self::regs();
         wait_sr_done();
 
-        regs.cr().modify(|r, w| unsafe { w.bits(r.bits() & !CR_START) });
+        regs.cr().modify(|_, w| w.start().clear_bit());
         wait_sr_done();
 
         unsafe {
-            regs.sr2().write_with_zero(|w| w.bits(SR2_RESET_REQ));
+            regs.sr2().write_with_zero(|w| w.reset_req_sr().set_bit());
         }
         wait_sr_done();
 
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
-            rcc.rst_cr().modify(|r, w| unsafe {
-                let bits = if config.auto_reset {
-                    r.bits() | RCC_RST_CR_IWDG_RESET_REQ_EN
-                } else {
-                    r.bits() & !RCC_RST_CR_IWDG_RESET_REQ_EN
-                };
-                w.bits(bits)
-            });
+            rcc.rst_cr().modify(|_, w| w.iwdg_reset_req_en().bit(config.auto_reset));
         });
 
-        regs.cr().modify(|r, w| unsafe {
-            let mut bits = (r.bits() & !CR_RSTEN) | (config.prescaler as u32 & CR_PREDIV_MASK);
-            if config.auto_reset {
-                bits |= CR_RSTEN;
+        regs.cr().modify(|_, w| {
+            w.rsten().bit(config.auto_reset);
+            match config.prescaler {
+                Prescaler::Div4 => w.prediv().value_4(),
+                Prescaler::Div8 => w.prediv().value_8(),
+                Prescaler::Div16 => w.prediv().value_16(),
+                Prescaler::Div32 => w.prediv().value_32(),
+                Prescaler::Div64 => w.prediv().value_64(),
+                Prescaler::Div128 => w.prediv().value_128(),
+                Prescaler::Div256 => w.prediv().value_256(),
             }
-            w.bits(bits)
         });
         wait_sr_done();
 
@@ -142,26 +127,27 @@ impl<'d> IndependentWatchdog<'d> {
     /// Start the watchdog.
     pub fn start(&self) {
         wait_sr_done();
-        Self::regs()
-            .cr()
-            .modify(|r, w| unsafe { w.bits(r.bits() | CR_START | CR_WKEN) });
-        while Self::regs().sr().read().bits() & SR_WRITE_CR_DONE == 0 {}
+        Self::regs().cr().modify(|_, w| {
+            w.start().set_bit();
+            w.wken().set_bit()
+        });
+        while !Self::regs().sr().read().write_cr_done().bit_is_set() {}
     }
 
     /// Stop the watchdog counter.
     pub fn stop(&self) {
         wait_sr_done();
-        Self::regs().cr().modify(|r, w| unsafe { w.bits(r.bits() & !CR_START) });
-        while Self::regs().sr().read().bits() & SR_WRITE_CR_DONE == 0 {}
+        Self::regs().cr().modify(|_, w| w.start().clear_bit());
+        while !Self::regs().sr().read().write_cr_done().bit_is_set() {}
     }
 
     /// Feed the watchdog.
     pub fn pet(&self) {
         let regs = Self::regs();
-        if regs.sr2().read().bits() & SR2_RESET_REQ != 0 {
+        if regs.sr2().read().reset_req_sr().bit_is_set() {
             wait_sr_done();
             unsafe {
-                regs.sr2().write_with_zero(|w| w.bits(SR2_RESET_REQ));
+                regs.sr2().write_with_zero(|w| w.reset_req_sr().set_bit());
             }
         }
 
@@ -174,22 +160,15 @@ impl<'d> IndependentWatchdog<'d> {
 
     /// Enable or disable the reset-request interrupt.
     pub fn set_interrupt_enabled(&self, enabled: bool) {
-        Self::regs().cr1().modify(|r, w| unsafe {
-            let bits = if enabled {
-                r.bits() | CR1_RESET_REQ_INT_EN
-            } else {
-                r.bits() & !CR1_RESET_REQ_INT_EN
-            };
-            w.bits(bits)
-        });
+        Self::regs().cr1().modify(|_, w| w.reset_req_int_en().bit(enabled));
     }
 
     /// Clear the reset-request interrupt status.
     pub fn clear_interrupt(&self) {
         unsafe {
-            Self::regs().sr2().write_with_zero(|w| w.bits(SR2_RESET_REQ));
+            Self::regs().sr2().write_with_zero(|w| w.reset_req_sr().set_bit());
         }
-        while Self::regs().sr().read().bits() & SR_WRITE_SR2_DONE == 0 {}
+        while !Self::regs().sr().read().write_sr2_done().bit_is_set() {}
     }
 
     #[inline]
@@ -199,5 +178,12 @@ impl<'d> IndependentWatchdog<'d> {
 }
 
 fn wait_sr_done() {
-    while IndependentWatchdog::regs().sr().read().bits() & SR_ALL_DONE != SR_ALL_DONE {}
+    let ready = || {
+        let sr = IndependentWatchdog::regs().sr().read();
+        sr.write_cr_done().bit_is_set()
+            && sr.max_set_done().bit_is_set()
+            && sr.win_set_done().bit_is_set()
+            && sr.write_sr2_done().bit_is_set()
+    };
+    while !ready() {}
 }
