@@ -47,37 +47,7 @@ use crate::pac::lpuart::RegisterBlock;
 use crate::rcc::{self, Peripheral};
 use crate::{interrupt, pac, peripherals};
 
-const BAUD_INT_POS: u32 = 10;
-const BAUD_FRA_POS: u32 = 6;
 const BAUD_INT_MAX: u32 = 0x0fff;
-
-const SR0_START_INVALID: u32 = 1 << 2;
-const SR0_PARITY_ERR: u32 = 1 << 3;
-const SR0_STOP_ERR: u32 = 1 << 4;
-const SR0_RX_OVERFLOW: u32 = 1 << 5;
-const SR0_RX_ERRORS: u32 = SR0_START_INVALID | SR0_PARITY_ERR | SR0_STOP_ERR | SR0_RX_OVERFLOW;
-
-const SR1_WRITE_SR0: u32 = 1 << 1;
-const SR1_WRITE_CR0: u32 = 1 << 2;
-const SR1_RX_NOT_EMPTY: u32 = 1 << 3;
-const SR1_TX_EMPTY: u32 = 1 << 4;
-const SR1_TX_DONE: u32 = 1 << 5;
-
-const CR1_RX_DONE_INT: u32 = 1 << 1;
-const CR1_START_INVALID_INT: u32 = 1 << 2;
-const CR1_PARITY_ERR_INT: u32 = 1 << 3;
-const CR1_STOP_ERR_INT: u32 = 1 << 4;
-const CR1_RX_OVERFLOW_INT: u32 = 1 << 5;
-const CR1_RX_NOT_EMPTY_INT: u32 = 1 << 6;
-const CR1_TX_EMPTY_INT: u32 = 1 << 7;
-const CR1_TX_DONE_INT: u32 = 1 << 8;
-const CR1_RX_INTS: u32 = CR1_RX_DONE_INT
-    | CR1_START_INVALID_INT
-    | CR1_PARITY_ERR_INT
-    | CR1_STOP_ERR_INT
-    | CR1_RX_OVERFLOW_INT
-    | CR1_RX_NOT_EMPTY_INT;
-const CR1_TX_INTS: u32 = CR1_TX_EMPTY_INT | CR1_TX_DONE_INT;
 
 const RCO4M_HZ: u32 = 3_600_000;
 const LOW_SPEED_HZ: u32 = 32_768;
@@ -124,25 +94,25 @@ impl Handler<interrupt::typelevel::LPUART> for InterruptHandler {
     unsafe fn on_interrupt() {
         let info = info();
         let regs = info.regs();
-        let cr1 = regs.cr1().read().bits();
+        let cr1 = regs.cr1().read();
         let sr0 = read_sr0(regs);
-        let sr1 = regs.sr1().read().bits();
+        let sr1 = regs.sr1().read();
 
-        let tx_pending = (cr1 & CR1_TX_EMPTY_INT != 0 && sr1 & SR1_TX_EMPTY != 0)
-            || (cr1 & CR1_TX_DONE_INT != 0 && sr1 & SR1_TX_DONE != 0);
+        let tx_pending = (cr1.tx_empty_int().bit_is_set() && sr1.tx_empty_state().bit_is_set())
+            || (cr1.tx_done_int().bit_is_set() && sr1.tx_done_state().bit_is_set());
         if tx_pending {
-            set_cr1_bits(regs, CR1_TX_INTS, false);
+            set_tx_interrupts(regs, false);
             info.state.tx_waker.wake();
         }
 
-        let rx_pending = (cr1 & CR1_RX_NOT_EMPTY_INT != 0 && sr1 & SR1_RX_NOT_EMPTY != 0)
-            || (cr1 & CR1_RX_DONE_INT != 0 && sr0 & (1 << 1) != 0)
-            || (cr1 & CR1_START_INVALID_INT != 0 && sr0 & SR0_START_INVALID != 0)
-            || (cr1 & CR1_PARITY_ERR_INT != 0 && sr0 & SR0_PARITY_ERR != 0)
-            || (cr1 & CR1_STOP_ERR_INT != 0 && sr0 & SR0_STOP_ERR != 0)
-            || (cr1 & CR1_RX_OVERFLOW_INT != 0 && sr0 & SR0_RX_OVERFLOW != 0);
+        let rx_pending = (cr1.rx_not_empty_int().bit_is_set() && sr1.rx_not_empty_state().bit_is_set())
+            || (cr1.rx_done_int().bit_is_set() && sr0.rx_done_state().bit_is_set())
+            || (cr1.start_invalid_int().bit_is_set() && sr0.start_invalid_state().bit_is_set())
+            || (cr1.parity_err_int().bit_is_set() && sr0.parity_err_state().bit_is_set())
+            || (cr1.stop_err_int().bit_is_set() && sr0.stop_err_state().bit_is_set())
+            || (cr1.rx_overflow_int().bit_is_set() && sr0.rx_overflow_state().bit_is_set());
         if rx_pending {
-            set_cr1_bits(regs, CR1_RX_INTS, false);
+            set_rx_interrupts(regs, false);
             info.state.rx_waker.wake();
         }
     }
@@ -187,17 +157,6 @@ pub enum DataBits {
     DataBits8,
 }
 
-impl DataBits {
-    const fn cr0_bits(self) -> u32 {
-        match self {
-            Self::DataBits5 => 0,
-            Self::DataBits6 => 1,
-            Self::DataBits7 => 2,
-            Self::DataBits8 => 3,
-        }
-    }
-}
-
 /// Parity selection (`lpuart_parity_t`).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -214,18 +173,6 @@ pub enum Parity {
     None,
 }
 
-impl Parity {
-    const fn cr0_bits(self) -> u32 {
-        match self {
-            Self::Even => 0x0,
-            Self::Odd => 0x4,
-            Self::Stick0 => 0x8,
-            Self::Stick1 => 0xc,
-            Self::None => 0x1c,
-        }
-    }
-}
-
 /// Number of stop bits (`lpuart_stop_bits_t`).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -234,15 +181,6 @@ pub enum StopBits {
     STOP1,
     /// Two stop bits.
     STOP2,
-}
-
-impl StopBits {
-    const fn cr0_bits(self) -> u32 {
-        match self {
-            Self::STOP1 => 0x0,
-            Self::STOP2 => 0x20,
-        }
-    }
 }
 
 /// Hardware flow control.
@@ -287,17 +225,6 @@ pub enum Wakeup {
     RxDone,
 }
 
-impl Wakeup {
-    const fn cr0_bits(self) -> u32 {
-        match self {
-            Self::None => 0,
-            Self::LowLevel => 1 << 22,
-            Self::StartBit => 1 << 23,
-            Self::RxDone => 1 << 24,
-        }
-    }
-}
-
 /// LPUART functional clock source (`rcc_lpuart_clk_source_t`).
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -316,14 +243,6 @@ impl ClockSource {
         match self {
             Self::Xo32k | Self::Rco32k => LOW_SPEED_HZ,
             Self::Rco4m => RCO4M_HZ,
-        }
-    }
-
-    const fn sel_bits(self) -> u8 {
-        match self {
-            Self::Xo32k => 0,
-            Self::Rco32k => 1,
-            Self::Rco4m => 2,
         }
     }
 }
@@ -476,49 +395,69 @@ fn configure_pin(pin: Peri<'_, impl Pin>, af: AlternateFunction, output: bool) -
 }
 
 fn wait_cr0_writable(regs: &RegisterBlock) {
-    while regs.sr1().read().bits() & (SR1_WRITE_SR0 | SR1_WRITE_CR0) != (SR1_WRITE_SR0 | SR1_WRITE_CR0) {}
+    let ready = || {
+        let sr1 = regs.sr1().read();
+        sr1.write_sr0_state().bit_is_set() && sr1.write_cr0_state().bit_is_set()
+    };
+    while !ready() {}
 }
 
 fn wait_sr0_readable(regs: &RegisterBlock) {
-    while regs.sr1().read().bits() & SR1_WRITE_SR0 == 0 {}
+    while !regs.sr1().read().write_sr0_state().bit_is_set() {}
 }
 
-fn read_sr0(regs: &RegisterBlock) -> u32 {
+fn read_sr0(regs: &RegisterBlock) -> pac::lpuart::sr0::R {
     wait_sr0_readable(regs);
-    regs.sr0().read().bits()
+    regs.sr0().read()
 }
 
-fn clear_sr0(regs: &RegisterBlock, mask: u32) {
+/// Clear latched SR0 receive-error flags (write-1-to-clear per flag).
+fn clear_sr0_errors(regs: &RegisterBlock, sr0: &pac::lpuart::sr0::R) {
     wait_cr0_writable(regs);
+    let start_invalid = sr0.start_invalid_state().bit_is_set();
+    let parity_err = sr0.parity_err_state().bit_is_set();
+    let stop_err = sr0.stop_err_state().bit_is_set();
+    let rx_overflow = sr0.rx_overflow_state().bit_is_set();
     unsafe {
-        regs.sr0().write_with_zero(|w| w.bits(mask));
+        regs.sr0().write_with_zero(|w| {
+            w.start_invalid_state().bit(start_invalid);
+            w.parity_err_state().bit(parity_err);
+            w.stop_err_state().bit(stop_err);
+            w.rx_overflow_state().bit(rx_overflow)
+        });
     }
     wait_cr0_writable(regs);
 }
 
-fn write_cr0(regs: &RegisterBlock, value: u32) {
-    wait_cr0_writable(regs);
-    unsafe {
-        regs.cr0().write_with_zero(|w| w.bits(value));
-    }
-    wait_cr0_writable(regs);
+/// Enable or disable the receive interrupt group (RX-done, invalid start,
+/// parity/stop errors, overflow, RX-not-empty).
+fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
+    regs.cr1().modify(|_, w| {
+        w.rx_done_int().bit(enable);
+        w.start_invalid_int().bit(enable);
+        w.parity_err_int().bit(enable);
+        w.stop_err_int().bit(enable);
+        w.rx_overflow_int().bit(enable);
+        w.rx_not_empty_int().bit(enable)
+    });
 }
 
-fn modify_cr0(regs: &RegisterBlock, clear: u32, set: u32) {
-    wait_cr0_writable(regs);
-    let value = (regs.cr0().read().bits() & !clear) | set;
-    unsafe {
-        regs.cr0().write_with_zero(|w| w.bits(value));
-    }
-    wait_cr0_writable(regs);
+/// Enable or disable the transmit interrupt group (TX-empty, TX-done).
+fn set_tx_interrupts(regs: &RegisterBlock, enable: bool) {
+    regs.cr1().modify(|_, w| {
+        w.tx_empty_int().bit(enable);
+        w.tx_done_int().bit(enable)
+    });
 }
 
-fn set_cr1_bits(regs: &RegisterBlock, mask: u32, enable: bool) {
-    let value = regs.cr1().read().bits();
-    let value = if enable { value | mask } else { value & !mask };
-    unsafe {
-        regs.cr1().write_with_zero(|w| w.bits(value));
-    }
+/// Enable or disable the TX-empty interrupt alone.
+fn set_tx_empty_interrupt(regs: &RegisterBlock, enable: bool) {
+    regs.cr1().modify(|_, w| w.tx_empty_int().bit(enable));
+}
+
+/// Enable or disable the TX-done interrupt alone.
+fn set_tx_done_interrupt(regs: &RegisterBlock, enable: bool) {
+    regs.cr1().modify(|_, w| w.tx_done_int().bit(enable));
 }
 
 fn calc_baud(freq: u32, baud: u32) -> Option<(u32, u32)> {
@@ -552,9 +491,12 @@ fn set_clock_source(source: ClockSource) {
 
     critical_section::with(|_| {
         let rcc_regs = unsafe { pac::Rcc::steal() };
-        rcc_regs.cr1().modify(|r, w| {
-            let bits = (r.bits() & !0xc) | (u32::from(source.sel_bits()) << 2);
-            unsafe { w.bits(bits) }
+        rcc_regs.cr1().modify(|_, w| {
+            w.lpuart_clk_sel().variant(match source {
+                ClockSource::Xo32k => pac::rcc::cr1::LpuartClkSel::Xo32k,
+                ClockSource::Rco32k => pac::rcc::cr1::LpuartClkSel::Rco32k,
+                ClockSource::Rco4m => pac::rcc::cr1::LpuartClkSel::Rco4m,
+            })
         });
     });
 }
@@ -569,94 +511,131 @@ fn enable_clock(source: ClockSource) -> Result<(), ConfigError> {
 fn apply_config(regs: &RegisterBlock, config: Config) -> Result<(), ConfigError> {
     let (ibaud, fbaud) = calc_baud(config.clock_source.frequency_hz(), config.baudrate).ok_or(ConfigError::Baudrate)?;
 
-    let cr0 = (ibaud << BAUD_INT_POS)
-        | (fbaud << BAUD_FRA_POS)
-        | config.stop_bits.cr0_bits()
-        | config.parity.cr0_bits()
-        | config.data_bits.cr0_bits()
-        | config.wakeup.cr0_bits();
+    let data_len = match config.data_bits {
+        DataBits::DataBits5 => 0,
+        DataBits::DataBits6 => 1,
+        DataBits::DataBits7 => 2,
+        DataBits::DataBits8 => 3,
+    };
+    let parity = match config.parity {
+        Parity::Even => pac::lpuart::cr0::LpuartParityCfg::Even,
+        Parity::Odd => pac::lpuart::cr0::LpuartParityCfg::Odd,
+        Parity::Stick0 => pac::lpuart::cr0::LpuartParityCfg::Bit0,
+        Parity::Stick1 => pac::lpuart::cr0::LpuartParityCfg::Bit1,
+        Parity::None => pac::lpuart::cr0::LpuartParityCfg::None,
+    };
+    let stop = match config.stop_bits {
+        StopBits::STOP1 => pac::lpuart::cr0::LpuartStopLen::Value1,
+        StopBits::STOP2 => pac::lpuart::cr0::LpuartStopLen::Value2,
+    };
 
-    // Baud / frame / wakeup live in CR0; PAC field accessors cover only the
-    // wakeup and RX/RTS enables, so the frame fields are written as raw bits.
-    write_cr0(regs, cr0);
+    // Full-register write like the vendor init: frame fields, baud dividers
+    // and wakeup enables; RX/RTS enables stay cleared until the direction
+    // setup below.
+    unsafe {
+        regs.cr0().write_with_zero(|w| {
+            w.lpuart_baud_rate_int().bits(ibaud as u16);
+            w.lpuart_baud_rate_fra().bits(fbaud as u8);
+            w.lpuart_data_len().bits(data_len);
+            w.lpuart_parity_cfg().variant(parity);
+            w.lpuart_stop_len().variant(stop);
+            w.low_level_wakeup().bit(matches!(config.wakeup, Wakeup::LowLevel));
+            w.start_wakeup().bit(matches!(config.wakeup, Wakeup::StartBit));
+            w.rx_done_wakeup().bit(matches!(config.wakeup, Wakeup::RxDone))
+        });
+    }
 
     let rts = matches!(config.flow_control, FlowControl::Rts | FlowControl::RtsCts);
     let cts = matches!(config.flow_control, FlowControl::Cts | FlowControl::RtsCts);
     if rts {
-        modify_cr0(regs, 0, 1 << 26);
+        regs.cr0().modify(|_, w| w.rts_enable().set_bit());
     }
-    set_cr1_bits(regs, 1 << 12, cts);
+    regs.cr1().modify(|_, w| w.cts_enable().bit(cts));
 
     Ok(())
 }
 
 fn set_rx_enable(regs: &RegisterBlock, enable: bool) {
     if enable {
-        modify_cr0(regs, 0, 1 << 25);
+        regs.cr0().modify(|_, w| w.rx_enable().set_bit());
     } else {
-        modify_cr0(regs, 1 << 25, 0);
+        regs.cr0().modify(|_, w| w.rx_enable().clear_bit());
     }
 }
 
 fn set_tx_enable(regs: &RegisterBlock, enable: bool) {
-    set_cr1_bits(regs, 1 << 9, enable);
+    regs.cr1().modify(|_, w| w.tx_enable().bit(enable));
 }
 
 fn set_dma_req(regs: &RegisterBlock, tx: bool, enable: bool) {
-    set_cr1_bits(regs, if tx { 1 << 10 } else { 1 << 11 }, enable);
+    regs.cr1().modify(|_, w| {
+        if tx {
+            w.tx_dma().bit(enable)
+        } else {
+            w.rx_dma().bit(enable)
+        }
+    });
 }
 
 fn shutdown(info: &'static Info) {
     let regs = info.regs();
     set_tx_enable(regs, false);
     set_rx_enable(regs, false);
-    set_cr1_bits(regs, CR1_TX_INTS | CR1_RX_INTS | (1 << 10) | (1 << 11), false);
+    set_tx_interrupts(regs, false);
+    set_rx_interrupts(regs, false);
+    set_dma_req(regs, true, false);
+    set_dma_req(regs, false, false);
     let _ = rcc::disable_peripheral(info.rcc);
 }
 
 fn take_rx_errors(regs: &RegisterBlock) -> Result<(), Error> {
     let sr0 = read_sr0(regs);
-    let errors = sr0 & SR0_RX_ERRORS;
-    if errors == 0 {
+    let start_invalid = sr0.start_invalid_state().bit_is_set();
+    let parity_err = sr0.parity_err_state().bit_is_set();
+    let stop_err = sr0.stop_err_state().bit_is_set();
+    let rx_overflow = sr0.rx_overflow_state().bit_is_set();
+    if !(start_invalid || parity_err || stop_err || rx_overflow) {
         return Ok(());
     }
-    clear_sr0(regs, errors);
-    if errors & SR0_RX_OVERFLOW != 0 {
+    clear_sr0_errors(regs, &sr0);
+    if rx_overflow {
         return Err(Error::Overrun);
     }
-    if errors & SR0_PARITY_ERR != 0 {
+    if parity_err {
         return Err(Error::Parity);
     }
-    if errors & SR0_STOP_ERR != 0 {
+    if stop_err {
         return Err(Error::Framing);
     }
     Err(Error::StartInvalid)
 }
 
 fn rx_not_empty(regs: &RegisterBlock) -> bool {
-    regs.sr1().read().bits() & SR1_RX_NOT_EMPTY != 0
+    regs.sr1().read().rx_not_empty_state().bit_is_set()
 }
 
 fn tx_empty(regs: &RegisterBlock) -> bool {
-    regs.sr1().read().bits() & SR1_TX_EMPTY != 0
+    regs.sr1().read().tx_empty_state().bit_is_set()
 }
 
 fn tx_done(regs: &RegisterBlock) -> bool {
-    regs.sr1().read().bits() & SR1_TX_DONE != 0
+    regs.sr1().read().tx_done_state().bit_is_set()
 }
 
 fn clear_tx_done(regs: &RegisterBlock) {
     // Vendor `lpuart_clear_tx_done_status` sets the TX_DONE bit in SR1.
-    regs.sr1().modify(|r, w| unsafe { w.bits(r.bits() | SR1_TX_DONE) });
+    unsafe {
+        regs.sr1().write_with_zero(|w| w.tx_done_state().set_bit());
+    }
 }
 
 fn read_data(regs: &RegisterBlock) -> u8 {
-    regs.data().read().bits() as u8
+    regs.data().read().lpuart_data().bits()
 }
 
 fn write_data(regs: &RegisterBlock, byte: u8) {
     unsafe {
-        regs.data().write_with_zero(|w| w.bits(u32::from(byte)));
+        regs.data().write_with_zero(|w| w.lpuart_data().bits(byte));
     }
 }
 
@@ -940,9 +919,9 @@ impl<'d> LpuartTx<'d, Async> {
                     return Poll::Ready(());
                 }
                 info.state.tx_waker.register(cx.waker());
-                set_cr1_bits(regs, CR1_TX_EMPTY_INT, true);
+                set_tx_empty_interrupt(regs, true);
                 if tx_empty(regs) {
-                    set_cr1_bits(regs, CR1_TX_EMPTY_INT, false);
+                    set_tx_empty_interrupt(regs, false);
                     return Poll::Ready(());
                 }
                 Poll::Pending
@@ -950,7 +929,7 @@ impl<'d> LpuartTx<'d, Async> {
             .await;
             write_data(regs, byte);
         }
-        set_cr1_bits(regs, CR1_TX_EMPTY_INT, false);
+        set_tx_empty_interrupt(regs, false);
         Ok(())
     }
 
@@ -966,15 +945,15 @@ impl<'d> LpuartTx<'d, Async> {
                 return Poll::Ready(());
             }
             info.state.tx_waker.register(cx.waker());
-            set_cr1_bits(regs, CR1_TX_DONE_INT, true);
+            set_tx_done_interrupt(regs, true);
             if tx_done(regs) {
-                set_cr1_bits(regs, CR1_TX_DONE_INT, false);
+                set_tx_done_interrupt(regs, false);
                 return Poll::Ready(());
             }
             Poll::Pending
         })
         .await;
-        set_cr1_bits(regs, CR1_TX_DONE_INT, false);
+        set_tx_done_interrupt(regs, false);
         clear_tx_done(regs);
         Ok(())
     }
@@ -1064,19 +1043,19 @@ impl<'d> LpuartRx<'d, Async> {
                 return Poll::Ready(Ok(()));
             }
             info.state.rx_waker.register(cx.waker());
-            set_cr1_bits(regs, CR1_RX_INTS, true);
+            set_rx_interrupts(regs, true);
             if let Err(e) = take_rx_errors(regs) {
-                set_cr1_bits(regs, CR1_RX_INTS, false);
+                set_rx_interrupts(regs, false);
                 return Poll::Ready(Err(e));
             }
             if rx_not_empty(regs) {
-                set_cr1_bits(regs, CR1_RX_INTS, false);
+                set_rx_interrupts(regs, false);
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending
         })
         .await?;
-        set_cr1_bits(regs, CR1_RX_INTS, false);
+        set_rx_interrupts(regs, false);
         Ok(())
     }
 
