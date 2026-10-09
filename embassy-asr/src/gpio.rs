@@ -22,7 +22,21 @@ use crate::{pac, peripherals};
 const PORT_COUNT: usize = 4;
 const PINS_PER_PORT: usize = 16;
 const PIN_COUNT: usize = PORT_COUNT * PINS_PER_PORT;
-const GPIO_BASE: usize = 0x4001_f000;
+/// Base address of the GPIO bank array, taken from the PAC so the memory map
+/// is not re-encoded here.
+///
+/// All four ports share the `gpioa::RegisterBlock` layout for every register
+/// this driver touches: the PAC aliases port B/C onto it
+/// (`pub use gpioa as gpiob/gpioc`), and port D differs only in `AFRH`
+/// (3-bit fields for pins 8–15, handled by the AFR width special-case).
+/// The PAC `int_cr` per-pin fields were verified against Reference Manual
+/// §11 (interleaved `POS@2n`/`NEG@2n+1`); the bank-wide fields below stay
+/// mask-addressed, which is inherent to banked GPIO on any HAL.
+#[inline]
+fn gpio_base() -> usize {
+    pac::Gpioa::PTR as usize
+}
+/// Port stride in the GPIO bank array.
 const GPIO_PORT_STRIDE: usize = 0x400;
 
 const INTERRUPT_NONE: u32 = 0;
@@ -340,7 +354,7 @@ impl_pin!(PD15, Port::D, 15);
 
 #[inline]
 fn regs(port: Port) -> &'static pac::gpioa::RegisterBlock {
-    let address = GPIO_BASE + port as usize * GPIO_PORT_STRIDE;
+    let address = gpio_base() + port as usize * GPIO_PORT_STRIDE;
     unsafe { &*(address as *const pac::gpioa::RegisterBlock) }
 }
 
@@ -348,6 +362,8 @@ fn regs(port: Port) -> &'static pac::gpioa::RegisterBlock {
 fn enable_port(port: Port) {
     critical_section::with(|_| {
         let rcc = unsafe { pac::Rcc::steal() };
+        // PAC gap: the PAC RCC has no GPIO clock-gate fields, so the CGR0
+        // position stays a computed bit (GPIOA..D descend from bit 25).
         let bit = 1 << (25 - port as u32);
         rcc.cgr0().modify(|r, w| unsafe { w.bits(r.bits() | bit) });
     });
