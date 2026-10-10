@@ -26,8 +26,9 @@ use crate::rcc::{self, Peripheral as RccPeripheral};
 const TIMER_TICK_HZ: u64 = 32_768;
 const ARR_MAX: u16 = 0xFFFF;
 
-// Vendor `tremo_lptimer.h` bit definitions (also in RM). ISR/CSR have proper
-// PAC accessors in official `asr6601-pac` 0.1.0; IER/ICR/ARR/CMP/CNT/SR1 are raw.
+// Vendor `tremo_lptimer.h` bit definitions (also in RM). ISR/CSR/CFGR/CR/CMP/ARR/CNT/SR1
+// have PAC field accessors; IER/ICR/ARR/CMP/CNT/SR1 have raw bitfield accessors
+// but no individual field accessors in the current PAC.
 const ISR_CMPM: u32 = 1 << 0;
 const ISR_ARRM: u32 = 1 << 1;
 const ISR_CMPOK: u32 = 1 << 3;
@@ -40,7 +41,6 @@ const IER_ARRM: u32 = 1 << 1;
 
 const CFGR_PRESC_MASK: u32 = 0xe00;
 
-const CR_ENABLE: u32 = 1 << 0;
 const CR_CNTSTRT: u32 = 1 << 2;
 
 // AFEC analog register 0x02 bits 13/14 power-gate XO32K. Clearing them matches
@@ -80,6 +80,8 @@ fn lptim() -> pac::Lptim0 {
 }
 
 fn wait_isr(mask: u32) {
+    // ISR has field accessors (cmpm, arrm, exttrig, cmpok, arrok, up, down, cfgrok, crok)
+    // but we use raw mask here to match the vendor polling sequence.
     for _ in 0..POLL_LIMIT {
         if lptim().isr().read().bits() & mask == mask {
             return;
@@ -88,6 +90,11 @@ fn wait_isr(mask: u32) {
     }
 }
 
+// CSR acknowledge for ARRM/CMPM, per the vendor wakeup example. Bounded so a
+// wedged timer cannot hang the caller (or the time-driver ISR) forever; the
+// normal path answers in a few cycles.
+// CSR has field accessors (cmpm, arrm, exttrig, up, down) but we use raw mask
+// to match the vendor wakeup example sequence.
 fn wait_csr(mask: u32) {
     for _ in 0..POLL_LIMIT {
         if lptim().csr().read().bits() & mask == mask {
@@ -115,13 +122,24 @@ impl LptimTimeDriver {
         // `rcc_set_lptimer0_clk_source`). New PAC has proper variants.
         critical_section::with(|_| {
             // Gate functional clock and wait for sync clear if needed.
-            let sync = || unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set();
+            let sync = || {
+                unsafe { pac::Rcc::steal() }
+                    .sr1()
+                    .read()
+                    .lptim0_clk_en_sync()
+                    .bit_is_set()
+            };
             if sync() {
                 unsafe { pac::Rcc::steal() }
                     .cgr1()
                     .modify(|_, w| w.lptim0_clk_en().clear_bit());
                 for _ in 0..POLL_LIMIT {
-                    if !unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set() {
+                    if !unsafe { pac::Rcc::steal() }
+                        .sr1()
+                        .read()
+                        .lptim0_clk_en_sync()
+                        .bit_is_set()
+                    {
                         break;
                     }
                     core::hint::spin_loop();
@@ -141,7 +159,10 @@ impl LptimTimeDriver {
 
         // Disarm interrupts before reconfiguring so no stale bootloader setup
         // can fire while registers are being reprogrammed.
-        lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !(IER_ARRM | IER_CMPM)) });
+        // IER has no field accessors in current PAC; use raw bits.
+        lptim()
+            .ier()
+            .modify(|r, w| unsafe { w.bits(r.bits() & !(IER_ARRM | IER_CMPM)) });
         Interrupt::LPTIM0.unpend();
 
         // Configure: internal clock, prescaler /1, no preload, no wave.
@@ -153,9 +174,9 @@ impl LptimTimeDriver {
         });
         wait_isr(ISR_CFGROK);
         // PRESC /1 is missing in PAC/SVD; program raw bits from tremo_lptimer.h.
-        lptim().cfgr().modify(|r, w| unsafe {
-            w.bits((r.bits() & !CFGR_PRESC_MASK) | 0x0)
-        });
+        lptim()
+            .cfgr()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !CFGR_PRESC_MASK) | 0x0) });
         wait_isr(ISR_CFGROK);
 
         // Enable peripheral.
@@ -163,28 +184,34 @@ impl LptimTimeDriver {
         wait_isr(ISR_CROK);
 
         // ARR = max.
+        // ARR has no field accessors in current PAC; use raw write.
         unsafe { lptim().arr().write_with_zero(|w| w.bits(ARR_MAX as u32)) };
         wait_isr(ISR_ARROK);
 
         // CMP = 0.
+        // CMP has no field accessors in current PAC; use raw write.
         unsafe { lptim().cmp().write_with_zero(|w| w.bits(0)) };
         wait_isr(ISR_CMPOK);
 
         // Clear pending flags.
+        // ICR has no field accessors in current PAC; use raw write.
         unsafe { lptim().icr().write_with_zero(|w| w.bits(ISR_ARRM | ISR_CMPM)) };
         wait_csr(ISR_ARRM | ISR_CMPM);
 
         // Enable overflow interrupt; compare enabled on demand.
+        // IER has no field accessors in current PAC; use raw bits.
         lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_ARRM) });
 
         // Start continuous counting (CNTSTRT missing in PAC; raw from header).
+        // CR has field accessors but CNTSTRT is missing; use raw bits.
         lptim().cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_CNTSTRT) });
         wait_isr(ISR_CROK);
 
-        // Silence unused-constant warning for ENABLE mask (we use PAC accessor).
-        let _ = CR_ENABLE;
-
         self.period.store(0, Ordering::Release);
+        // No second init is expected (hal::init runs once), but leave no
+        // stale deadline behind if it ever re-runs: the queue itself belongs
+        // to embassy-time and cannot be drained safely from here.
+        critical_section::with(|cs| self.alarm.borrow(cs).set(u64::MAX));
         self.initialized.store(true, Ordering::Release);
 
         Interrupt::LPTIM0.unpend();
@@ -195,8 +222,14 @@ impl LptimTimeDriver {
     fn now_inner(&self) -> u64 {
         // Called with interrupts masked to avoid tearing across overflow.
         let period = self.period.load(Ordering::Relaxed);
+        // CNT has no field accessors; use raw read.
         let cnt = lptim().cnt().read().bits() as u16 as u64;
-        let pending = if lptim().isr().read().bits() & ISR_ARRM != 0 { 1 } else { 0 };
+        // ISR has field accessors (arrm) but we use raw for consistency.
+        let pending = if lptim().isr().read().bits() & ISR_ARRM != 0 {
+            1
+        } else {
+            0
+        };
         ((period as u64 + pending as u64) << 16) | cnt
     }
 
@@ -204,6 +237,7 @@ impl LptimTimeDriver {
         self.alarm.borrow(cs).set(timestamp);
 
         if timestamp == u64::MAX {
+            // IER has no field accessors; use raw bits.
             lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
             return true;
         }
@@ -215,12 +249,14 @@ impl LptimTimeDriver {
             return false;
         }
 
+        // CMP has no field accessors; use raw write.
         let cmp = (timestamp & 0xFFFF) as u32;
         unsafe { lptim().cmp().write_with_zero(|w| w.bits(cmp)) };
         wait_isr(ISR_CMPOK);
 
         let diff = timestamp - now;
         if diff < COMPARE_THRESHOLD {
+            // IER has no field accessors; use raw bits.
             lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_CMPM) });
         } else {
             lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
@@ -259,11 +295,13 @@ impl LptimTimeDriver {
     }
 
     fn on_interrupt(&self) {
+        // ISR has field accessors (cmpm, arrm, etc.), IER has raw bits only.
         let pending = lptim().isr().read().bits() & lptim().ier().read().bits() & (ISR_ARRM | ISR_CMPM);
         if pending == 0 {
             return;
         }
 
+        // ICR has raw bits only.
         unsafe { lptim().icr().write_with_zero(|w| w.bits(pending)) };
         if pending & (ISR_ARRM | ISR_CMPM) != 0 {
             wait_csr(pending & (ISR_ARRM | ISR_CMPM));

@@ -21,6 +21,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering, compiler_fence};
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -325,6 +326,16 @@ pub enum Error {
     Break,
     /// DMA helper failed.
     Dma(dma::Error),
+    /// Clocks not initialized.
+    ClocksNotInitialized,
+    /// Invalid baud rate.
+    Baudrate,
+    /// RCC error.
+    Rcc(rcc::Error),
+    /// Neither RX nor TX pin provided.
+    NoRxOrTx,
+    /// Required flow-control pin missing.
+    MissingFlowControlPin,
 }
 
 impl core::fmt::Display for Error {
@@ -335,6 +346,11 @@ impl core::fmt::Display for Error {
             Self::Parity => write!(f, "UART parity error"),
             Self::Break => write!(f, "UART break"),
             Self::Dma(_) => write!(f, "UART DMA error"),
+            Self::ClocksNotInitialized => write!(f, "UART clocks not initialized"),
+            Self::Baudrate => write!(f, "UART invalid baud rate"),
+            Self::NoRxOrTx => write!(f, "UART no RX or TX pin"),
+            Self::MissingFlowControlPin => write!(f, "UART missing flow control pin"),
+            Self::Rcc(err) => write!(f, "UART RCC error: {err}"),
         }
     }
 }
@@ -347,6 +363,8 @@ impl embedded_io::Error for Error {
             Self::Overrun => embedded_io::ErrorKind::OutOfMemory,
             Self::Framing | Self::Parity | Self::Break => embedded_io::ErrorKind::InvalidData,
             Self::Dma(_) => embedded_io::ErrorKind::Other,
+            Self::ClocksNotInitialized | Self::Baudrate => embedded_io::ErrorKind::Other,
+            Self::NoRxOrTx | Self::MissingFlowControlPin | Self::Rcc(_) => embedded_io::ErrorKind::Other,
         }
     }
 }
@@ -380,8 +398,8 @@ fn calc_baud_div(uart_clk: u32, baud: u32) -> Option<(u32, u32)> {
     Some((int_div, fac_div & 0x3f))
 }
 
-fn uart_clock_hz(info: &'static Info) -> Result<u32, ConfigError> {
-    let clocks = rcc::clocks().ok_or(ConfigError::ClocksNotInitialized)?;
+fn uart_clock_hz(info: &'static Info) -> Result<u32, Error> {
+    let clocks = rcc::clocks().ok_or(Error::ClocksNotInitialized)?;
     let rcc_regs = unsafe { pac::Rcc::steal() };
     // The PAC owns the per-UART selector positions; only the 2-bit value is
     // interpreted here. Values match the vendor clock tree.
@@ -418,9 +436,9 @@ fn configure_pin(pin: Peri<'_, impl Pin>, af: AlternateFunction, output: bool) -
     flex.into_inner()
 }
 
-fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool) -> Result<(), ConfigError> {
+fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool) -> Result<(), Error> {
     let uart_clk = uart_clock_hz(info)?;
-    let (ibrd, fbrd) = calc_baud_div(uart_clk, config.baudrate).ok_or(ConfigError::Baudrate)?;
+    let (ibrd, fbrd) = calc_baud_div(uart_clk, config.baudrate).ok_or(Error::Baudrate)?;
 
     let regs = info.regs();
 
@@ -471,7 +489,7 @@ fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool)
         (true, true) => (true, true),
         (true, false) => (false, true),
         (false, true) => (true, false),
-        (false, false) => return Err(ConfigError::NoRxOrTx),
+        (false, false) => return Err(Error::NoRxOrTx),
     };
     let (rtsen, ctsen) = match config.flow_control {
         FlowControl::None => (false, false),
@@ -499,9 +517,9 @@ fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool)
     Ok(())
 }
 
-fn enable_clock(info: &'static Info) -> Result<(), ConfigError> {
-    rcc::enable_peripheral(info.rcc).map_err(ConfigError::Rcc)?;
-    rcc::reset_peripheral(info.rcc).map_err(ConfigError::Rcc)?;
+fn enable_clock(info: &'static Info) -> Result<(), Error> {
+    rcc::enable_peripheral(info.rcc).map_err(Error::Rcc)?;
+    rcc::reset_peripheral(info.rcc).map_err(Error::Rcc)?;
     Ok(())
 }
 
@@ -595,7 +613,7 @@ impl<'d> Uart<'d, Blocking> {
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, Error> {
         Self::new_inner::<T>(peri, erase_pin(tx), erase_pin(rx), None, None, config, false)
     }
 
@@ -607,11 +625,11 @@ impl<'d> Uart<'d, Blocking> {
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, Error> {
         Self::new_inner::<T>(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
@@ -630,7 +648,7 @@ impl<'d> Uart<'d, Async> {
         rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, Error> {
         Self::new_inner::<T>(peri, erase_pin(tx), erase_pin(rx), None, None, config, true)
     }
 
@@ -643,11 +661,11 @@ impl<'d> Uart<'d, Async> {
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, Error> {
         Self::new_inner::<T>(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
@@ -693,12 +711,12 @@ impl<'d, M: Mode> Uart<'d, M> {
         cts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         config: Config,
         enable_irq: bool,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, Error> {
         match config.flow_control {
-            FlowControl::Rts if rts.is_none() => return Err(ConfigError::MissingFlowControlPin),
-            FlowControl::Cts if cts.is_none() => return Err(ConfigError::MissingFlowControlPin),
+            FlowControl::Rts if rts.is_none() => return Err(Error::MissingFlowControlPin),
+            FlowControl::Cts if cts.is_none() => return Err(Error::MissingFlowControlPin),
             FlowControl::RtsCts if rts.is_none() || cts.is_none() => {
-                return Err(ConfigError::MissingFlowControlPin);
+                return Err(Error::MissingFlowControlPin);
             }
             _ => {}
         }
@@ -778,6 +796,20 @@ impl<'d, M: Mode> Uart<'d, M> {
         self.tx.blocking_flush()
     }
 
+
+
+    /// Change the baud rate.
+    pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), Error> {
+        self.tx.set_baudrate(baudrate)
+    }
+
+    /// Reconfigure the UART with new settings.
+    pub fn set_config(&mut self, config: Config) -> Result<(), Error> {
+        self.tx.set_config(config)?;
+        self.rx.set_config(config)?;
+        Ok(())
+    }
+
     /// Blocking DMA write.
     pub fn blocking_write_dma(&mut self, channel: &mut DmaChannel<'_, Blocking>, buffer: &[u8]) -> Result<(), Error> {
         self.tx.blocking_write_dma(channel, buffer)
@@ -796,6 +828,47 @@ impl<'d, M: Mode> Uart<'d, M> {
 impl<'d, M: Mode> UartTx<'d, M> {
     fn regs(&self) -> &'static RegisterBlock {
         self.info.regs()
+    }
+
+    /// Send a break condition (TX line held low for at least one frame time).
+    ///
+    /// This sets the BRK bit in LCR_H, holds it for at least one frame time,
+    /// then clears it.
+    pub fn send_break(&mut self) -> Result<(), Error> {
+        let regs = self.regs();
+        // Set BRK bit
+        regs.lcr_h().modify(|_, w| w.brk().set_bit());
+        // Hold for at least one frame time (10 bits at current baud rate)
+        // At minimum baudrate (300), one frame is ~33ms. At 115200, ~87us.
+        // Wait for 10ms which covers all practical baud rates.
+        cortex_m::asm::delay(240_000);
+        // Clear BRK bit
+        regs.lcr_h().modify(|_, w| w.brk().clear_bit());
+        Ok(())
+    }
+
+    /// Change the baud rate.
+    pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), Error> {
+        let regs = self.regs();
+        let info = self.info;
+        let uart_clk = if info.pclk0 {
+            crate::rcc::clocks().map(|c| c.pclk0_hz).ok_or(Error::ClocksNotInitialized)?
+        } else {
+            crate::rcc::clocks().map(|c| c.pclk1_hz).ok_or(Error::ClocksNotInitialized)?
+        };
+        let (ibrd, fbrd) = calc_baud_div(uart_clk, baudrate).ok_or(Error::Baudrate)?;
+        unsafe { regs.ibrd().write_with_zero(|w| w.bits(ibrd)); };
+        unsafe { regs.fbrd().write_with_zero(|w| w.bits(fbrd)); };
+        // LCR_H write is needed to latch the new baud rate divisors
+        regs.lcr_h().modify(|r, w| unsafe { w.bits(r.bits()) });
+        Ok(())
+    }
+
+    /// Reconfigure with new settings.
+    pub fn set_config(&mut self, config: Config) -> Result<(), Error> {
+        let info = self.info;
+        apply_config(info, config, true, true)?;
+        Ok(())
     }
 
     /// Blocking write of the entire buffer.
@@ -840,6 +913,9 @@ impl<'d> UartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        // If dropped mid-byte the TX interrupt would stay armed with no
+        // waiter; disarm it. Steady-state RX stays armed by design.
+        let irq_guard = OnDrop::new(|| set_tx_interrupt(regs, false));
         for &byte in buffer {
             poll_fn(|cx| {
                 if !regs.fr().read().txff().bit_is_set() {
@@ -856,6 +932,7 @@ impl<'d> UartTx<'d, Async> {
             .await;
             write_dr(regs, byte);
         }
+        irq_guard.defuse();
         set_tx_interrupt(regs, false);
         Ok(())
     }
@@ -880,6 +957,9 @@ impl<'d> UartTx<'d, Async> {
         if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
             return Ok(());
         }
+        // If dropped mid-flush the TX interrupt would stay armed with no
+        // waiter; disarm it.
+        let irq_guard = OnDrop::new(|| set_tx_interrupt(regs, false));
         loop {
             let event = poll_fn(|cx| {
                 if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
@@ -900,6 +980,7 @@ impl<'d> UartTx<'d, Async> {
                 embassy_futures::select::Either::Second(()) => continue,
             }
         }
+        irq_guard.defuse();
         set_tx_interrupt(regs, false);
         Ok(())
     }
@@ -913,6 +994,9 @@ impl<'d> UartTx<'d, Async> {
         let dest = regs.dr().as_ptr();
         set_dma_req(regs, true, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, true, false));
         let result = unsafe {
             channel
                 .write(buffer, dest.cast::<u8>(), self.info.dma_tx, TransferOptions::default())
@@ -920,6 +1004,7 @@ impl<'d> UartTx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, true, false);
         result
     }
@@ -928,6 +1013,13 @@ impl<'d> UartTx<'d, Async> {
 impl<'d, M: Mode> UartRx<'d, M> {
     fn regs(&self) -> &'static RegisterBlock {
         self.info.regs()
+    }
+
+    /// Reconfigure with new settings.
+    pub fn set_config(&mut self, config: Config) -> Result<(), Error> {
+        let info = self.info;
+        apply_config(info, config, true, false)?;
+        Ok(())
     }
 
     /// Blocking read that fills the entire buffer.
@@ -1028,6 +1120,9 @@ impl<'d> UartRx<'d, Async> {
         let src = regs.dr().as_ptr();
         set_dma_req(regs, false, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, false, false));
         let result = unsafe {
             channel
                 .read(src.cast::<u8>(), buffer, self.info.dma_rx, TransferOptions::default())
@@ -1035,8 +1130,28 @@ impl<'d> UartRx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, false, false);
         result
+    }
+}
+
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Uart<'d, M> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        // Clone the config since the internal method takes ownership
+        self.set_config(config.clone()).map_err(|e| match e {
+            Error::ClocksNotInitialized => ConfigError::ClocksNotInitialized,
+            Error::Baudrate => ConfigError::Baudrate,
+            Error::Rcc(e) => ConfigError::Rcc(e),
+            Error::MissingFlowControlPin => ConfigError::MissingFlowControlPin,
+            Error::NoRxOrTx => ConfigError::NoRxOrTx,
+            _ => ConfigError::Baudrate, // fallback
+        })
     }
 }
 

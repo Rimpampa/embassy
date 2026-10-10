@@ -5,8 +5,9 @@
 //! runtime power transitions are made through an owned [`Pwr`] constructed from
 //! [`peripherals::PWR`].
 //!
-//! The vendor SVD does not describe the fields in the PWR status registers.
-//! Consequently this module exposes those registers only as [`RawStatus`].
+//! The vendor SVD does not describe the fields in the PWR control/status registers.
+//! All registers (CR0-CR5, SR0-SR1) are accessed via raw `bits()` accessors.
+//! Field accessors are not available in the current PAC.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -311,6 +312,8 @@ impl<'d> Pwr<'d> {
     }
 
     /// Capture the two raw PWR status registers.
+    ///
+    /// PWR status registers lack field accessors in the PAC; use `bits()`.
     pub fn raw_status(&self) -> RawStatus {
         let pwr = regs();
         RawStatus {

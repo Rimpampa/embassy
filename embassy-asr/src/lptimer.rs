@@ -4,9 +4,9 @@
 //! ASR6601 SDK examples (`lptimer_wakeup_stop`, `external_trigger`,
 //! `external_clock`, `lptimer_encoder`).
 //!
-//! Many multi-bit CFGR/CR fields and the IER/ICR/CMP/ARR/CNT/SR1 field layouts
-//! are missing from the PAC/SVD. Those bits are programmed with the masks from
-//! `tremo_lptimer.h`.
+//! PAC field accessors exist for ISR, IER, ICR, CR, CFGR, CSR and are used below.
+//! SR1, CMP, ARR, CNT lack field accessors and remain raw (masks from
+//! `tremo_lptimer.h`).
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
@@ -57,6 +57,10 @@ static WAKERS: [AtomicWaker; 2] = [const { AtomicWaker::new() }; 2];
 static PENDING: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
 
 /// LPTIMER driver error.
+///
+/// Deliberately a single type: `Timeout` is returned by both init handshakes
+/// (`create`, `configure`) and runtime setters, so an `Error`/`ConfigError`
+/// split would duplicate it in both enums for no checking benefit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
@@ -553,7 +557,9 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
         }
 
         // Vendor wakeup example waits for CSR only for CMPM/ARRM; wait for any
-        // flag that has a CSR acknowledge bit.
+        // flag that has a CSR acknowledge bit. Bounded (`POLL_LIMIT`) so ISR
+        // dwell is finite even on wedged hardware; the normal path answers
+        // in a few cycles.
         let csr_mask = interrupt_to_csr(pending);
         if csr_mask != 0 {
             for _ in 0..POLL_LIMIT {
@@ -660,6 +666,10 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Write ARR and wait for `ARROK`.
+    ///
+    /// The block only latches ARR while enabled: call
+    /// [`set_enabled`](Self::set_enabled)`(true)` first, otherwise this
+    /// returns [`Error::Timeout`] (`Arrok`).
     pub fn set_arr(&self, value: u16) -> Result<(), Error> {
         unsafe {
             self.regs().arr().write_with_zero(|w| w.bits(u32::from(value)));
@@ -668,6 +678,8 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Write CMP and wait for `CMPOK`.
+    ///
+    /// Requires the timer to be enabled first, like [`set_arr`](Self::set_arr).
     pub fn set_cmp(&self, value: u16) -> Result<(), Error> {
         unsafe {
             self.regs().cmp().write_with_zero(|w| w.bits(u32::from(value)));
@@ -790,9 +802,9 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// source is enabled.
     pub fn set_interrupt_enabled(&self, flags: InterruptFlags, enabled: bool) {
         let mask = flags.bits();
-        self.regs().ier().modify(|r, w| unsafe {
+        self.regs().ier().modify(|r, w| {
             let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
-            w.bits(bits)
+            unsafe { w.bits(bits) }
         });
 
         if self.regs().ier().read().bits() & IT_MASK != 0 {
@@ -910,6 +922,8 @@ where
 }
 
 fn interrupt_to_csr(flags: u32) -> u32 {
+    // ISR has field accessors (cmpm, arrm, exttrig, up, down) - using raw
+    // mask here to match the CSR bit positions.
     let mut csr = 0;
     if flags & ISR_CMPM != 0 {
         csr |= CSR_CMPM;
@@ -930,6 +944,8 @@ fn interrupt_to_csr(flags: u32) -> u32 {
 }
 
 fn wait_isr<T: Instance>(mask: u32, target: TimeoutTarget) -> Result<(), Error> {
+    // ISR has field accessors (cmpm, arrm, exttrig, cmpok, arrok, up, down, cfgrok, crok)
+    // but we use raw mask here to match the vendor polling sequence.
     for _ in 0..POLL_LIMIT {
         if T::regs().isr().read().bits() & mask == mask {
             return Ok(());

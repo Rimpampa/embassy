@@ -3,8 +3,8 @@
 //! The PAC describes the digital AFEC registers at `0x4000_8200`. The vendor
 //! SDK also accesses an analog register window starting at `0x4000_8000`,
 //! where register index `n` is located at byte offset `n * 4`. That window is
-//! not present in the current SVD, so its volatile accesses are kept in the
-//! crate-private [`analog`] module below.
+//! not present in the current SVD, so its volatile accesses are kept in a
+//! crate-private `analog` module below.
 //!
 //! The SDK publishes bit assignments for three raw status signals. It does not
 //! publish bit assignments or write semantics for `CR` or `INT_SR`; therefore

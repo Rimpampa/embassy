@@ -70,11 +70,16 @@ pub struct IndependentWatchdog<'d> {
 }
 
 impl<'d> IndependentWatchdog<'d> {
-    /// Enable clocks, apply `config`, and leave the watchdog stopped.
+    /// Enable clocks, apply `config`, and start the watchdog.
+    ///
+    /// Like `embassy-stm32`'s independent watchdog, construction starts
+    /// watching: keep the handle alive (and keep petting) to avoid a reset.
+    /// [`stop`](Self::stop) halts it; dropping the handle stops it as well.
     pub fn new(peri: Peri<'d, peripherals::IWDG>, config: Config) -> Self {
         let _ = rcc::enable_peripheral(Peripheral::Iwdg);
         let this = Self { _peri: peri };
         this.configure(config);
+        this.start();
         this
     }
 
@@ -178,6 +183,10 @@ impl<'d> IndependentWatchdog<'d> {
 }
 
 fn wait_sr_done() {
+    // Fail-stop init handshake: the IWDG runs on its own clock domain and the
+    // vendor driver polls these bits without timeout. Bounding this would
+    // silently continue with a half-programmed watchdog, which is worse than
+    // hanging a wedged chip here before it can run unsupervised.
     let ready = || {
         let sr = IndependentWatchdog::regs().sr().read();
         sr.write_cr_done().bit_is_set()
@@ -186,4 +195,12 @@ fn wait_sr_done() {
             && sr.write_sr2_done().bit_is_set()
     };
     while !ready() {}
+}
+
+impl Drop for IndependentWatchdog<'_> {
+    fn drop(&mut self) {
+        // Stop on drop so a discarded handle cannot reset the system out
+        // from under the new owner; keep the handle alive to keep watching.
+        self.stop();
+    }
 }

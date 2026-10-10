@@ -59,6 +59,14 @@ pub struct Flash<'d> {
     size: u32,
 }
 
+impl Drop for Flash<'_> {
+    fn drop(&mut self) {
+        // Nothing to tear down: the EFC has no RCC gate in this HAL, and an
+        // in-progress program/erase runs to completion in hardware once
+        // started (all blocking calls poll it before returning).
+    }
+}
+
 impl<'d> Flash<'d> {
     /// Create a flash driver.
     ///
@@ -207,6 +215,9 @@ fn lock(efc: &pac::Efc) {
 
 fn wait_done(efc: &pac::Efc) {
     while efc.sr().read().operation_done().bit_is_clear() {}
+    // Intentionally bit-identical write-back: clears every latched flag at
+    // once exactly like the vendor driver, instead of selecting flags that
+    // the PAC may model incompletely.
     let status = efc.sr().read().bits();
     unsafe {
         efc.sr().write_with_zero(|w| w.bits(status));

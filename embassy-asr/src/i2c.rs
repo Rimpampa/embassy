@@ -36,6 +36,7 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal::i2c::Operation as EhOperation;
@@ -104,6 +105,13 @@ const BLOCKING_POLL_LIMIT: u32 = 1_000_000;
 /// I2C transfer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+/// I2C driver error.
+///
+/// Deliberately a single type rather than an `Error`/`ConfigError` split:
+/// `AddressMode` is validated per transfer (the address is a per-operation
+/// parameter, not construction config) and `Timeout` spans both init
+/// handshakes and transfer waits, so a split would duplicate those variants
+/// in both enums for no checking benefit.
 #[non_exhaustive]
 pub enum Error {
     /// ACK was not received for an address or data byte.
@@ -803,7 +811,10 @@ impl<'d> I2c<'d, Async> {
         };
         let off = IrqEnables::default();
 
-        poll_fn(|cx| {
+        // If dropped mid-wait the armed enables would outlive the waiter and
+        // the ISR would keep firing with nothing to wake; disarm them.
+        let irq_guard = OnDrop::new(|| set_irq_enables(regs, off));
+        let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
             let outcome = match ready(regs) {
                 Poll::Ready(result) => {
@@ -827,7 +838,9 @@ impl<'d> I2c<'d, Async> {
             };
             outcome
         })
-        .await
+        .await;
+        irq_guard.defuse();
+        result
     }
 
     async fn wait_tx_empty(&mut self) -> Result<(), Error> {
@@ -879,6 +892,11 @@ impl<'d> I2c<'d, Async> {
     }
 
     /// Attempt to recover a jammed bus.
+    ///
+    /// This is synchronous bit-banging (GPIO remux + `asm::delay` clocks, up
+    /// to milliseconds) on an async method: recovery is inherently a
+    /// blocking bus procedure with no interrupt to wait on, and it runs
+    /// rarely (only after a wedged transfer). Do not call it in a hot path.
     ///
     /// A slave stuck mid-byte holds SDA Low, so the TWSI unit can never
     /// generate a START and every transfer hangs. If SDA is observed Low the
@@ -1067,6 +1085,18 @@ impl<'d> I2c<'d, Async> {
     }
 }
 
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for I2c<'d, M> {
+    type Config = Config;
+    type ConfigError = Error;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        // I2c is always master; I2cSlave is a separate type
+        self.set_config(config)
+    }
+}
+
 impl<'d, M: Mode> Drop for I2c<'d, M> {
     fn drop(&mut self) {
         shutdown(self.info);
@@ -1172,6 +1202,10 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
     }
 
     /// Block until the slave address is detected; return the transfer direction.
+    ///
+    /// Deliberately unbounded: a slave's job is to wait for a master, and a
+    /// quiet bus is idle, not wedged. Pair with `embassy_time::with_timeout`
+    /// if the application needs a deadline.
     pub fn blocking_listen(&mut self) -> Result<SlaveOp, Error> {
         let regs = self.regs();
         loop {
@@ -1260,7 +1294,10 @@ impl<'d> I2cSlave<'d, Async> {
         };
         let off = IrqEnables::default();
 
-        poll_fn(|cx| {
+        // If dropped mid-wait the armed enables would outlive the waiter and
+        // the ISR would keep firing with nothing to wake; disarm them.
+        let irq_guard = OnDrop::new(|| set_irq_enables(regs, off));
+        let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
             match ready(regs) {
                 Poll::Ready(result) => {
@@ -1279,10 +1316,14 @@ impl<'d> I2cSlave<'d, Async> {
                 }
             }
         })
-        .await
+        .await;
+        irq_guard.defuse();
+        result
     }
 
     /// Wait until the slave address is detected; return the transfer direction.
+    ///
+    /// Deliberately without timeout (see [`I2cSlave::blocking_listen`]).
     pub async fn listen(&mut self) -> Result<SlaveOp, Error> {
         let mut op = SlaveOp::Read;
         self.wait_mask(

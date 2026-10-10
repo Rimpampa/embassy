@@ -2,6 +2,9 @@
 //!
 //! Register programming follows the vendor `tremo_bstimer` driver and the
 //! `bstimer/onepulse` / DAC trigger examples.
+//!
+//! PAC gap: CR2 (MMS), CNT, PSC, ARR have no field accessors and remain raw.
+//! CR1, DIER, SR, EGR have field accessors used below.
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
@@ -19,7 +22,6 @@ use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 const INSTANCE_COUNT: usize = 2;
 
 const CR2_MMS_MASK: u32 = 0x70;
-const SR_UIF: u32 = 1 << 0;
 
 static WAKERS: [AtomicWaker; INSTANCE_COUNT] = [const { AtomicWaker::new() }; INSTANCE_COUNT];
 static UPDATE_PENDING: [AtomicBool; INSTANCE_COUNT] = [const { AtomicBool::new(false) }; INSTANCE_COUNT];
@@ -219,17 +221,28 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     pub fn configure(&self, config: Config) {
         let regs = T::regs();
 
+        // CR2 has no PAC field accessor for MMS; write raw bits.
+        // CR2 MMS field at bits 4-6 (0x70).
         regs.cr2().modify(|r, w| unsafe {
             let bits = (r.bits() & !CR2_MMS_MASK) | (config.master_mode as u32);
             w.bits(bits)
         });
 
+        // CR1 ARPE has field accessor.
         regs.cr1().modify(|_, w| w.arpe().bit(config.autoreload_preload));
 
+        // ARR and PSC have no field accessors in current PAC; use raw writes.
         unsafe {
             regs.arr().write_with_zero(|w| w.bits(u32::from(config.period)));
             regs.psc().write_with_zero(|w| w.bits(u32::from(config.prescaler)));
         }
+
+        // PSC is shadowed until an update event; without this the first
+        // period runs with the old prescaler (reset value 0, i.e. a ~40 us
+        // "period" instead of the configured one). The forced event also
+        // latches UIF, so clear it to avoid a spurious first update.
+        self.generate_update();
+        self.clear_update_flag();
     }
 
     /// Start the counter (`CR1.CEN`).
@@ -276,13 +289,14 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     /// Clear `SR.UIF`.
     ///
     /// The vendor BSTIMER driver never clears this flag; GPTIMER does via
-    /// `SR &= ~UIF`. This uses the same write-clear sequence through a raw
-    /// pointer because the PAC marks `SR` read-only.
+    /// `SR &= ~UIF`. The PAC marks `SR` read-only, so use the raw write
+    /// that matches GPTIMER's `timer_clear_status` (write-0 to the flag).
     pub fn clear_update_flag(&self) {
         clear_update_flag_raw(T::sr_ptr());
     }
 
     /// Generate an update event (`EGR.UG`), reloading the prescaler shadow.
+    /// EGR has field accessor for UG.
     pub fn generate_update(&self) {
         unsafe {
             T::regs().egr().write_with_zero(|w| w.ug().set_bit());
@@ -290,11 +304,13 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     }
 
     /// Current counter value.
+    /// CNT has no field accessors; use raw read.
     pub fn counter(&self) -> u32 {
         T::regs().cnt().read().bits()
     }
 
     /// Write the counter register.
+    /// CNT has no field accessors; use raw write.
     pub fn set_counter(&self, value: u32) {
         unsafe {
             T::regs().cnt().write_with_zero(|w| w.bits(value));
@@ -302,11 +318,13 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     }
 
     /// Current auto-reload value.
+    /// ARR has no field accessors; use raw read.
     pub fn period(&self) -> u32 {
         T::regs().arr().read().bits()
     }
 
     /// Current prescaler value.
+    /// PSC has no field accessors; use raw read.
     pub fn prescaler(&self) -> u32 {
         T::regs().psc().read().bits()
     }
@@ -352,8 +370,8 @@ impl<T: Instance> Drop for UpdateInterruptGuard<T> {
 #[inline]
 fn clear_update_flag_raw(sr: *mut u32) {
     // Mirror GPTIMER `timer_clear_status` / embassy-asr `timer.rs`: write 0 to
-    // the flag being cleared (rc_w0). BSTIMER PAC `SR` is read-only.
+    // the flag being cleared (rc_w0). The PAC marks `SR` read-only.
     unsafe {
-        core::ptr::write_volatile(sr, !SR_UIF);
+        core::ptr::write_volatile(sr, !(1 << 0));
     }
 }

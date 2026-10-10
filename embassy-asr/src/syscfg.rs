@@ -7,15 +7,10 @@
 
 use crate::{Peri, pac, peripherals};
 
-const DMA_REQUEST_MASK: u32 = 0x3f;
-
 const BOOT_MODE_FLAG: u32 = 1 << 29;
 
-const I2S_MASTER_ENABLE: u32 = 1 << 14;
 // All divisors emitted by the vendor SDK need six bits. Bit 22 is the next
 // documented field, but bit 21 is otherwise undocumented and is left alone.
-const I2S_WORD_SELECT_DIVIDER_MASK: u32 = 0x3f << 15;
-const I2S_WORD_SELECT_ENABLE: u32 = 1 << 22;
 
 /// DMA controller whose request input is being routed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,19 +36,6 @@ pub enum DmaChannel {
     Channel2,
     /// DMA channel 3.
     Channel3,
-}
-
-impl DmaChannel {
-    const fn request_shift(self) -> u32 {
-        // The SDK assigns one byte per channel in descending channel order:
-        // channel 0 occupies bits 29:24 and channel 3 occupies bits 5:0.
-        match self {
-            Self::Channel0 => 24,
-            Self::Channel1 => 16,
-            Self::Channel2 => 8,
-            Self::Channel3 => 0,
-        }
-    }
 }
 
 /// Peripheral request routed to a DMA channel.
@@ -274,31 +256,38 @@ fn modify_cr4(mask: u32, value: u32) {
     });
 }
 
-fn modify_cr10(mask: u32, value: u32) {
-    critical_section::with(|_| {
-        regs()
-            .cr10()
-            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (value & mask)) });
-    });
-}
-
 pub(crate) fn configure_dma_request(controller: DmaController, channel: DmaChannel, request: DmaRequest) {
     enable_clock();
 
-    let shift = channel.request_shift();
-    let mask = DMA_REQUEST_MASK << shift;
-    let value = (request as u32) << shift;
-
-    critical_section::with(|_| match controller {
-        DmaController::Dma0 => {
-            regs()
-                .cr0()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) });
-        }
-        DmaController::Dma1 => {
-            regs()
-                .cr1()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | value) });
+    // Request numbers are the `dma_hand_shake_t` values (no PAC enum);
+    // field positions come from the generated handshake selectors.
+    let value = request as u8;
+    critical_section::with(|_| unsafe {
+        match (controller, channel) {
+            (DmaController::Dma0, DmaChannel::Channel0) => {
+                regs().cr0().modify(|_, w| w.dmac0_handshake0_sel().bits(value))
+            }
+            (DmaController::Dma0, DmaChannel::Channel1) => {
+                regs().cr0().modify(|_, w| w.dmac0_handshake1_sel().bits(value))
+            }
+            (DmaController::Dma0, DmaChannel::Channel2) => {
+                regs().cr0().modify(|_, w| w.dmac0_handshake2_sel().bits(value))
+            }
+            (DmaController::Dma0, DmaChannel::Channel3) => {
+                regs().cr0().modify(|_, w| w.dmac0_handshake3_sel().bits(value))
+            }
+            (DmaController::Dma1, DmaChannel::Channel0) => {
+                regs().cr1().modify(|_, w| w.dmac1_handshake0_sel().bits(value))
+            }
+            (DmaController::Dma1, DmaChannel::Channel1) => {
+                regs().cr1().modify(|_, w| w.dmac1_handshake1_sel().bits(value))
+            }
+            (DmaController::Dma1, DmaChannel::Channel2) => {
+                regs().cr1().modify(|_, w| w.dmac1_handshake2_sel().bits(value))
+            }
+            (DmaController::Dma1, DmaChannel::Channel3) => {
+                regs().cr1().modify(|_, w| w.dmac1_handshake3_sel().bits(value))
+            }
         }
     });
 }
@@ -306,12 +295,18 @@ pub(crate) fn configure_dma_request(controller: DmaController, channel: DmaChann
 pub(crate) fn configure_i2s_master(word_size: I2sWordSize) {
     enable_clock();
 
-    let mask = I2S_MASTER_ENABLE | I2S_WORD_SELECT_DIVIDER_MASK;
-    let value = I2S_MASTER_ENABLE | (word_size.word_select_divider() << 15);
-    modify_cr10(mask, value);
+    // Master mode plus the word-select divider derived from the sample word
+    // size (exact SDK `i2s_calculate_devision()` results).
+    // Master mode plus the word-select divider derived from the sample word
+    // size (exact SDK `i2s_calculate_devision()` results). Read-modify-write
+    // like before: unrelated CR10 fields (QSPI remap, WS select) are preserved.
+    regs().cr10().modify(|_, w| {
+        w.i2s_mode_sel().master();
+        unsafe { w.i2s_ws_len().bits(word_size.word_select_divider() as u8) }
+    });
 }
 
 pub(crate) fn set_i2s_word_select_output_enabled(enabled: bool) {
     enable_clock();
-    modify_cr10(I2S_WORD_SELECT_ENABLE, if enabled { I2S_WORD_SELECT_ENABLE } else { 0 });
+    regs().cr10().modify(|_, w| w.i2s_ws_en().bit(enabled));
 }

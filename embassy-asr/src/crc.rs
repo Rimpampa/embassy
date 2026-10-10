@@ -5,11 +5,9 @@
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
 
+/// CRC data register address for narrow volatile feeds (the PAC models only
+/// the whole-word accessor; sub-word writes need the raw address).
 const CRC_DR_ADDR: usize = 0x4002_2004;
-
-const CR_CALC_FLAG: u32 = 1 << 6;
-const CR_CALC_INIT: u32 = 1 << 5;
-const CR_REVERSE_OUT: u32 = 1 << 0;
 
 /// Polynomial width programmed into CRC_CR.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,16 +95,29 @@ impl<'d> Crc<'d> {
     /// Reconfigure the CRC engine and latch the initial value.
     pub fn configure(&self, config: Config) {
         let regs = Self::regs();
-        let mut cr = config.poly_size as u32 | config.reverse_in as u32;
-        if config.reverse_out {
-            cr |= CR_REVERSE_OUT;
-        }
-        cr |= CR_CALC_INIT;
-
+        let poly_size = match config.poly_size {
+            PolySize::Bits32 => pac::crc::cr::PolySize::Value32,
+            PolySize::Bits16 => pac::crc::cr::PolySize::Value16,
+            PolySize::Bits8 => pac::crc::cr::PolySize::Value8,
+            PolySize::Bits7 => pac::crc::cr::PolySize::Value7,
+        };
+        let reverse_in = match config.reverse_in {
+            ReverseIn::None => pac::crc::cr::ReverseIn::None,
+            ReverseIn::Byte => pac::crc::cr::ReverseIn::Byte,
+            ReverseIn::HalfWord => pac::crc::cr::ReverseIn::Hword,
+            ReverseIn::Word => pac::crc::cr::ReverseIn::Word,
+        };
+        // INIT and POLY must be in place before CR (with CALC_INIT) is
+        // written: that write is what latches the initial value.
         unsafe {
             regs.init().write_with_zero(|w| w.bits(config.init_value));
             regs.poly().write_with_zero(|w| w.bits(config.poly));
-            regs.cr().write_with_zero(|w| w.bits(cr));
+            regs.cr().write_with_zero(|w| {
+                w.poly_size().variant(poly_size);
+                w.reverse_in().variant(reverse_in);
+                w.reverse_out_en().bit(config.reverse_out);
+                w.calc_init().set_bit()
+            });
         }
     }
 
@@ -146,7 +157,7 @@ impl<'d> Crc<'d> {
 
     fn wait_done() {
         let regs = Self::regs();
-        while regs.cr().read().bits() & CR_CALC_FLAG != 0 {}
+        while regs.cr().read().calc_flag().bit_is_set() {}
     }
 
     #[inline]

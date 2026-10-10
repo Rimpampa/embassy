@@ -35,6 +35,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, Ordering, compiler_fence};
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -529,9 +530,15 @@ fn apply_config(regs: &RegisterBlock, config: Config) -> Result<(), ConfigError>
         StopBits::STOP2 => pac::lpuart::cr0::LpuartStopLen::Value2,
     };
 
+    // CR0 lives behind an asynchronous clock-domain handshake (SR1
+    // WRITE_CR0/WRITE_SR0): a write issued while the previous one is still
+    // being synchronised is silently dropped, so wait before and after every
+    // CR0 access (vendor `lpuart_init` / `lpuart_config_rx` do the same).
+    //
     // Full-register write like the vendor init: frame fields, baud dividers
     // and wakeup enables; RX/RTS enables stay cleared until the direction
     // setup below.
+    wait_cr0_writable(regs);
     unsafe {
         regs.cr0().write_with_zero(|w| {
             w.lpuart_baud_rate_int().bits(ibaud as u16);
@@ -544,11 +551,14 @@ fn apply_config(regs: &RegisterBlock, config: Config) -> Result<(), ConfigError>
             w.rx_done_wakeup().bit(matches!(config.wakeup, Wakeup::RxDone))
         });
     }
+    wait_cr0_writable(regs);
 
     let rts = matches!(config.flow_control, FlowControl::Rts | FlowControl::RtsCts);
     let cts = matches!(config.flow_control, FlowControl::Cts | FlowControl::RtsCts);
     if rts {
+        wait_cr0_writable(regs);
         regs.cr0().modify(|_, w| w.rts_enable().set_bit());
+        wait_cr0_writable(regs);
     }
     regs.cr1().modify(|_, w| w.cts_enable().bit(cts));
 
@@ -556,11 +566,9 @@ fn apply_config(regs: &RegisterBlock, config: Config) -> Result<(), ConfigError>
 }
 
 fn set_rx_enable(regs: &RegisterBlock, enable: bool) {
-    if enable {
-        regs.cr0().modify(|_, w| w.rx_enable().set_bit());
-    } else {
-        regs.cr0().modify(|_, w| w.rx_enable().clear_bit());
-    }
+    wait_cr0_writable(regs);
+    regs.cr0().modify(|_, w| w.rx_enable().bit(enable));
+    wait_cr0_writable(regs);
 }
 
 fn set_tx_enable(regs: &RegisterBlock, enable: bool) {
@@ -686,8 +694,8 @@ impl<'d> Lpuart<'d, Blocking> {
     ) -> Result<Self, ConfigError> {
         Self::new_inner(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
@@ -722,8 +730,8 @@ impl<'d> Lpuart<'d, Async> {
     ) -> Result<Self, ConfigError> {
         Self::new_inner(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
@@ -859,6 +867,19 @@ impl<'d, M: Mode> Lpuart<'d, M> {
     ) -> Result<(), Error> {
         self.rx.blocking_read_dma(channel, buffer)
     }
+
+    /// Reconfigure the LPUART with new settings.
+    pub fn set_config(&mut self, config: Config) -> Result<(), ConfigError> {
+        let info = self.tx.info;
+        let regs = info.regs();
+        apply_config(regs, config)?;
+        Ok(())
+    }
+
+    /// Reconfigure the LPUART with new settings (for SetConfig trait).
+    pub fn set_config_ref(&mut self, config: &Config) -> Result<(), ConfigError> {
+        self.set_config(config.clone())
+    }
 }
 
 impl<'d, M: Mode> LpuartTx<'d, M> {
@@ -913,6 +934,9 @@ impl<'d> LpuartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        // If dropped mid-byte the TX interrupt would stay armed with no
+        // waiter; disarm it.
+        let irq_guard = OnDrop::new(|| set_tx_empty_interrupt(regs, false));
         for &byte in buffer {
             poll_fn(|cx| {
                 if tx_empty(regs) {
@@ -929,6 +953,7 @@ impl<'d> LpuartTx<'d, Async> {
             .await;
             write_data(regs, byte);
         }
+        irq_guard.defuse();
         set_tx_empty_interrupt(regs, false);
         Ok(())
     }
@@ -940,6 +965,7 @@ impl<'d> LpuartTx<'d, Async> {
         if tx_empty(regs) && !tx_done(regs) {
             return Ok(());
         }
+        let irq_guard = OnDrop::new(|| set_tx_done_interrupt(regs, false));
         poll_fn(|cx| {
             if tx_done(regs) {
                 return Poll::Ready(());
@@ -953,6 +979,7 @@ impl<'d> LpuartTx<'d, Async> {
             Poll::Pending
         })
         .await;
+        irq_guard.defuse();
         set_tx_done_interrupt(regs, false);
         clear_tx_done(regs);
         Ok(())
@@ -967,6 +994,9 @@ impl<'d> LpuartTx<'d, Async> {
         let dest = regs.data().as_ptr();
         set_dma_req(regs, true, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, true, false));
         let result = unsafe {
             channel
                 .write(buffer, dest.cast::<u8>(), self.info.dma_tx, TransferOptions::default())
@@ -974,6 +1004,7 @@ impl<'d> LpuartTx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, true, false);
         result
     }
@@ -1078,6 +1109,9 @@ impl<'d> LpuartRx<'d, Async> {
         let src = regs.data().as_ptr();
         set_dma_req(regs, false, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, false, false));
         let result = unsafe {
             channel
                 .read(src.cast::<u8>(), buffer, self.info.dma_rx, TransferOptions::default())
@@ -1085,8 +1119,20 @@ impl<'d> LpuartRx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, false, false);
         result
+    }
+}
+
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Lpuart<'d, M> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config_ref(config)
     }
 }
 

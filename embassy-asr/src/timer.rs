@@ -7,9 +7,9 @@
 //! update/CC interrupts, and typed alternate-function pins from the datasheet
 //! mux tables. Encoder, slave-mode, DMA burst, and OR remaps are omitted.
 //!
-//! Several multi-bit CR1/CCMR/SMCR/OR fields and the data registers lack PAC
-//! field accessors; those are programmed with the bit masks from
-//! `tremo_timer.h`.
+//! PAC field accessors exist for DIER, SR, EGR, and CCER and are used below.
+//! CR1/CR2/CCMR1/CCMR2/SMCR/OR/CNT/PSC/ARR/CCRx lack field accessors and
+//! remain raw (bit masks from `tremo_timer.h`).
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
@@ -22,6 +22,7 @@ use embassy_sync::waitqueue::AtomicWaker;
 use crate::gpio::{AlternateFunction, Flex, Pin as GpioPin, Pull};
 use crate::interrupt::typelevel::{Binding, Handler, Interrupt as TypelevelInterrupt};
 use crate::rcc::{self, Peripheral as RccPeripheral};
+use crate::time::Hertz;
 use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
 const CR1_CEN: u32 = 1 << 0;
@@ -47,30 +48,17 @@ const OC_PWM2_ODD: u32 = 0x7000;
 const CC_SEL_INPUT_SAME_EVEN: u32 = 0x1;
 const CC_SEL_INPUT_SAME_ODD: u32 = 0x100;
 
-const CCER_CC0E: u32 = 1 << 0;
-const CCER_CC0P: u32 = 1 << 1;
-const CCER_CC0NP: u32 = 1 << 3;
-const CCER_CC1E: u32 = 1 << 4;
-const CCER_CC1P: u32 = 1 << 5;
-const CCER_CC1NP: u32 = 1 << 7;
-const CCER_CC2E: u32 = 1 << 8;
-const CCER_CC2P: u32 = 1 << 9;
-const CCER_CC2NP: u32 = 1 << 11;
-const CCER_CC3E: u32 = 1 << 12;
-const CCER_CC3P: u32 = 1 << 13;
-const CCER_CC3NP: u32 = 1 << 15;
-
 const SR_IT_MASK: u32 = 0x5f;
 const DIER_IT_MASK: u32 = 0x5f;
 
 static WAKERS: [AtomicWaker; 4] = [const { AtomicWaker::new() }; 4];
 static PENDING: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 
-/// TIMER driver error.
+/// TIMER configuration error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
-pub enum Error {
+pub enum ConfigError {
     /// Requested frequency cannot be represented with 16-bit PSC/ARR.
     InvalidFrequency,
     /// Kernel clock is unknown (RCC not initialized) or zero.
@@ -79,13 +67,13 @@ pub enum Error {
     Rcc(rcc::Error),
 }
 
-impl From<rcc::Error> for Error {
+impl From<rcc::Error> for ConfigError {
     fn from(value: rcc::Error) -> Self {
         Self::Rcc(value)
     }
 }
 
-impl core::fmt::Display for Error {
+impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidFrequency => write!(f, "TIMER frequency cannot be represented"),
@@ -95,7 +83,7 @@ impl core::fmt::Display for Error {
     }
 }
 
-impl core::error::Error for Error {}
+impl core::error::Error for ConfigError {}
 
 /// Capture/compare channel (vendor 0-based indexing).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -388,12 +376,16 @@ pub struct InterruptHandler<T: Instance> {
 impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
         let regs = T::regs();
-        let pending = regs.sr().read().bits() & regs.dier().read().bits() & SR_IT_MASK;
+        let sr = regs.sr().read().bits();
+        let dier = regs.dier().read().bits();
+        let pending = sr & dier & SR_IT_MASK;
         if pending == 0 {
             return;
         }
 
         // Vendor `timer_clear_status`: write zeros to the flags being cleared.
+        // SR has field accessors (uif, cc0if, etc.) but we clear by raw mask
+        // to match the vendor `timer_clear_status` sequence.
         unsafe {
             regs.sr().write_with_zero(|w| w.bits(!pending));
         }
@@ -403,7 +395,7 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     }
 }
 
-fn enable_instance<T: Instance>() -> Result<(), Error> {
+fn enable_instance<T: Instance>() -> Result<(), ConfigError> {
     rcc::enable_peripheral(T::rcc_peripheral())?;
     rcc::reset_peripheral(T::rcc_peripheral())?;
     T::nv_interrupt().disable();
@@ -445,12 +437,13 @@ fn set_enabled<T: Instance>(enabled: bool) {
 
 fn set_interrupt_enabled<T: Instance>(flags: InterruptFlags, enabled: bool) {
     let mask = flags.bits() & DIER_IT_MASK;
-    T::regs().dier().modify(|r, w| unsafe {
+    let regs = T::regs();
+    regs.dier().modify(|r, w| {
         let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
-        w.bits(bits)
+        unsafe { w.bits(bits) }
     });
 
-    if T::regs().dier().read().bits() & DIER_IT_MASK != 0 {
+    if regs.dier().read().bits() & DIER_IT_MASK != 0 {
         T::nv_interrupt().unpend();
         unsafe { T::nv_interrupt().enable() };
     } else {
@@ -460,6 +453,8 @@ fn set_interrupt_enabled<T: Instance>(flags: InterruptFlags, enabled: bool) {
 
 fn clear_interrupt<T: Instance>(flags: InterruptFlags) {
     let mask = flags.bits();
+    // SR has field accessors (uif, cc0if, etc.) but we clear by raw mask
+    // to match the vendor `timer_clear_status` sequence.
     unsafe {
         T::regs().sr().write_with_zero(|w| w.bits(!mask));
     }
@@ -488,14 +483,15 @@ async fn wait_for_flags<T: Instance>(flags: InterruptFlags) -> InterruptFlags {
     .await
 }
 
-fn compute_psc_arr(pclk: u32, frequency_hz: u32) -> Result<(u16, u16), Error> {
+fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), ConfigError> {
+    let frequency_hz = frequency.hz();
     if frequency_hz == 0 || pclk == 0 {
-        return Err(Error::InvalidFrequency);
+        return Err(ConfigError::InvalidFrequency);
     }
 
     let ticks = pclk / frequency_hz;
     if ticks == 0 {
-        return Err(Error::InvalidFrequency);
+        return Err(ConfigError::InvalidFrequency);
     }
 
     // Prefer a large ARR for duty-cycle resolution: ticks = (PSC+1)*(ARR+1).
@@ -517,33 +513,34 @@ fn compute_psc_arr(pclk: u32, frequency_hz: u32) -> Result<(u16, u16), Error> {
         }
     }
 
-    Err(Error::InvalidFrequency)
+    Err(ConfigError::InvalidFrequency)
 }
 
+// PAC field accessors are used directly in each method below.
 fn channel_enable_mask(channel: Channel) -> u32 {
     match channel {
-        Channel::Ch0 => CCER_CC0E,
-        Channel::Ch1 => CCER_CC1E,
-        Channel::Ch2 => CCER_CC2E,
-        Channel::Ch3 => CCER_CC3E,
+        Channel::Ch0 => 1 << 0,
+        Channel::Ch1 => 1 << 4,
+        Channel::Ch2 => 1 << 8,
+        Channel::Ch3 => 1 << 12,
     }
 }
 
 fn channel_polarity_mask(channel: Channel) -> u32 {
     match channel {
-        Channel::Ch0 => CCER_CC0P,
-        Channel::Ch1 => CCER_CC1P,
-        Channel::Ch2 => CCER_CC2P,
-        Channel::Ch3 => CCER_CC3P,
+        Channel::Ch0 => 1 << 1,
+        Channel::Ch1 => 1 << 5,
+        Channel::Ch2 => 1 << 9,
+        Channel::Ch3 => 1 << 13,
     }
 }
 
 fn channel_np_mask(channel: Channel) -> u32 {
     match channel {
-        Channel::Ch0 => CCER_CC0NP,
-        Channel::Ch1 => CCER_CC1NP,
-        Channel::Ch2 => CCER_CC2NP,
-        Channel::Ch3 => CCER_CC3NP,
+        Channel::Ch0 => 1 << 3,
+        Channel::Ch1 => 1 << 7,
+        Channel::Ch2 => 1 << 11,
+        Channel::Ch3 => 1 << 15,
     }
 }
 
@@ -552,15 +549,43 @@ fn channel_both_edge_mask(channel: Channel) -> u32 {
 }
 
 fn set_channel_enable<T: Instance>(channel: Channel, enabled: bool) {
-    let mask = channel_enable_mask(channel);
-    T::regs().ccer().modify(|r, w| unsafe {
-        let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
-        w.bits(bits)
-    });
+    let regs = T::regs();
+    match channel {
+        Channel::Ch0 => {
+            regs.ccer().modify(|_, w| {
+                w.cc0e().bit(enabled);
+                w
+            });
+        }
+        Channel::Ch1 => {
+            regs.ccer().modify(|_, w| {
+                w.cc1e().bit(enabled);
+                w
+            });
+        }
+        Channel::Ch2 => {
+            regs.ccer().modify(|_, w| {
+                w.cc2e().bit(enabled);
+                w
+            });
+        }
+        Channel::Ch3 => {
+            regs.ccer().modify(|_, w| {
+                w.cc3e().bit(enabled);
+                w
+            });
+        }
+    }
 }
 
 fn channel_enabled<T: Instance>(channel: Channel) -> bool {
-    T::regs().ccer().read().bits() & channel_enable_mask(channel) != 0
+    let regs = T::regs();
+    match channel {
+        Channel::Ch0 => regs.ccer().read().cc0e().bit_is_set(),
+        Channel::Ch1 => regs.ccer().read().cc1e().bit_is_set(),
+        Channel::Ch2 => regs.ccer().read().cc2e().bit_is_set(),
+        Channel::Ch3 => regs.ccer().read().cc3e().bit_is_set(),
+    }
 }
 
 fn set_compare<T: Instance>(channel: Channel, value: u16) {
@@ -630,14 +655,40 @@ fn configure_pwm_channel<T: Instance>(channel: Channel, pwm: PwmConfig, duty: u1
 
     set_compare::<T>(channel, duty);
 
-    regs.ccer().modify(|r, w| unsafe {
-        let mut bits = r.bits() & !(polarity | np);
-        if pwm.polarity == OutputPolarity::ActiveLow {
-            bits |= polarity;
+    match channel {
+        Channel::Ch0 => {
+            regs.ccer().modify(|_, w| {
+                w.cc0e().set_bit();
+                w.cc0p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc0np().clear_bit();
+                w
+            });
         }
-        bits |= enable;
-        w.bits(bits)
-    });
+        Channel::Ch1 => {
+            regs.ccer().modify(|_, w| {
+                w.cc1e().set_bit();
+                w.cc1p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc1np().clear_bit();
+                w
+            });
+        }
+        Channel::Ch2 => {
+            regs.ccer().modify(|_, w| {
+                w.cc2e().set_bit();
+                w.cc2p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc2np().clear_bit();
+                w
+            });
+        }
+        Channel::Ch3 => {
+            regs.ccer().modify(|_, w| {
+                w.cc3e().set_bit();
+                w.cc3p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc3np().clear_bit();
+                w
+            });
+        }
+    }
 }
 
 fn configure_capture_channel<T: Instance>(channel: Channel, polarity: CapturePolarity) {
@@ -680,8 +731,73 @@ fn configure_capture_channel<T: Instance>(channel: Channel, polarity: CapturePol
         CapturePolarity::Both => both,
     };
 
-    regs.ccer()
-        .modify(|r, w| unsafe { w.bits((r.bits() & !both) | polarity_bits | enable) });
+    let regs = T::regs();
+    match channel {
+        Channel::Ch0 => {
+            regs.ccer().modify(|_, w| {
+                w.cc0e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc0p().set_bit();
+                    w.cc0np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc0p().set_bit();
+                    w.cc0np().set_bit();
+                } else {
+                    w.cc0p().clear_bit();
+                    w.cc0np().clear_bit();
+                }
+                w
+            });
+        }
+        Channel::Ch1 => {
+            regs.ccer().modify(|_, w| {
+                w.cc1e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc1p().set_bit();
+                    w.cc1np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc1p().set_bit();
+                    w.cc1np().set_bit();
+                } else {
+                    w.cc1p().clear_bit();
+                    w.cc1np().clear_bit();
+                }
+                w
+            });
+        }
+        Channel::Ch2 => {
+            regs.ccer().modify(|_, w| {
+                w.cc2e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc2p().set_bit();
+                    w.cc2np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc2p().set_bit();
+                    w.cc2np().set_bit();
+                } else {
+                    w.cc2p().clear_bit();
+                    w.cc2np().clear_bit();
+                }
+                w
+            });
+        }
+        Channel::Ch3 => {
+            regs.ccer().modify(|_, w| {
+                w.cc3e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc3p().set_bit();
+                    w.cc3np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc3p().set_bit();
+                    w.cc3np().set_bit();
+                } else {
+                    w.cc3p().clear_bit();
+                    w.cc3np().clear_bit();
+                }
+                w
+            });
+        }
+    }
 }
 
 fn configure_output_af<'d>(pin: Peri<'d, impl GpioPin>, af: AlternateFunction) -> Flex<'d> {
@@ -710,7 +826,7 @@ impl<'d, T: Instance> Timer<'d, T> {
     ///
     /// Does not bind the update interrupt; use [`Self::new`] for
     /// interrupt-driven use.
-    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
         Self::create(peri, config)
     }
 
@@ -722,11 +838,11 @@ impl<'d, T: Instance> Timer<'d, T> {
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         Self::create(peri, config)
     }
 
-    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
         enable_instance::<T>()?;
         let this = Self { _peri: peri };
         apply_basic_config::<T>(config);
@@ -772,14 +888,14 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 
     /// Kernel clock frequency in hertz.
-    pub fn clock_hz(&self) -> Result<u32, Error> {
+    pub fn clock_hz(&self) -> Result<u32, ConfigError> {
         T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
-            .ok_or(Error::ClockUnavailable)
+            .ok_or(ConfigError::ClockUnavailable)
     }
 
     /// Tick frequency after the prescaler: `f_kernel / (PSC + 1)`.
-    pub fn tick_hz(&self) -> Result<u32, Error> {
+    pub fn tick_hz(&self) -> Result<u32, ConfigError> {
         let pclk = self.clock_hz()?;
         Ok(pclk / (u32::from(self.prescaler()) + 1))
     }
@@ -932,7 +1048,7 @@ pub struct SimplePwm<'d, T: Instance> {
 }
 
 impl<'d, T: Instance> SimplePwm<'d, T> {
-    /// Create a PWM timer at `frequency_hz`, optionally attaching channel pins.
+    /// Create a PWM timer at `frequency`, optionally attaching channel pins.
     pub fn new(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
@@ -940,15 +1056,15 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         ch1: Option<PwmPin<'d, T, Ch1>>,
         ch2: Option<PwmPin<'d, T, Ch2>>,
         ch3: Option<PwmPin<'d, T, Ch3>>,
-        frequency_hz: u32,
+        frequency: Hertz,
         pwm: PwmConfig,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         enable_instance::<T>()?;
 
         let pclk = T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
-            .ok_or(Error::ClockUnavailable)?;
-        let (prescaler, period) = compute_psc_arr(pclk, frequency_hz)?;
+            .ok_or(ConfigError::ClockUnavailable)?;
+        let (prescaler, period) = compute_psc_arr(pclk, frequency)?;
 
         apply_basic_config::<T>(Config {
             prescaler,
@@ -988,10 +1104,10 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
     }
 
     /// Output frequency programmed into PSC/ARR.
-    pub fn frequency_hz(&self) -> Result<u32, Error> {
+    pub fn frequency_hz(&self) -> Result<u32, ConfigError> {
         let pclk = T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
-            .ok_or(Error::ClockUnavailable)?;
+            .ok_or(ConfigError::ClockUnavailable)?;
         let psc = T::regs().psc().read().bits() + 1;
         let arr = T::regs().arr().read().bits() + 1;
         Ok(pclk / psc / arr)
@@ -1070,7 +1186,7 @@ impl<'d, T: Instance> InputCapture<'d, T> {
         pin: CapturePin<'d, T, C>,
         config: Config,
         polarity: CapturePolarity,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         enable_instance::<T>()?;
         apply_basic_config::<T>(config);
         configure_capture_channel::<T>(C::CHANNEL, polarity);

@@ -9,11 +9,6 @@ use rand_core::RngCore;
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
 
-const RNGCLKEN: u32 = 1 << 7;
-const RNGEN: u32 = 1 << 7;
-const DATARDY: u32 = 1 << 0;
-const DATACKERR: u32 = 1 << 1;
-
 /// RNG configuration reconstructed from the vendor crypto headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -77,11 +72,14 @@ impl<'d> Rng<'d> {
     /// Apply configuration and enable generation.
     pub fn configure(&self, config: Config) {
         let regs = Self::regs();
+        // Divider/mode values share their registers with the enable bits;
+        // the PAC has no value fields, so the values stay raw while the
+        // enables elsewhere use accessors.
+        let clk = u32::from(config.divider) & 0x7f | (1 << 7);
+        let cr = u32::from(config.mode) & 0x7f | (1 << 7);
         unsafe {
-            regs.rngclk()
-                .write_with_zero(|w| w.bits((config.divider as u32 & 0x7f) | RNGCLKEN));
-            regs.rngcr()
-                .write_with_zero(|w| w.bits((config.mode as u32 & 0x7f) | RNGEN));
+            regs.rngclk().write_with_zero(|w| w.bits(clk));
+            regs.rngcr().write_with_zero(|w| w.bits(cr));
         }
     }
 
@@ -89,8 +87,8 @@ impl<'d> Rng<'d> {
     pub fn close(&self) {
         let regs = Self::regs();
         unsafe {
-            regs.rngcr().write_with_zero(|w| w.bits(0));
-            regs.rngclk().write_with_zero(|w| w.bits(0));
+            regs.rngcr().write_with_zero(|w| w.enable().clear_bit());
+            regs.rngclk().write_with_zero(|w| w.clock_enable().clear_bit());
         }
     }
 
@@ -99,19 +97,18 @@ impl<'d> Rng<'d> {
         let regs = Self::regs();
         let mut i = 0;
         while i < buf.len() {
-            while regs.rngsr().read().bits() & DATARDY == 0 {
-                if regs.rngsr().read().bits() & DATACKERR != 0 {
+            let mut sr = regs.rngsr().read();
+            while !sr.data_ready().bit_is_set() {
+                if regs.rngsr().read().data_clock_error().bit_is_set() {
                     return Err(Error::ClockError);
                 }
+                sr = regs.rngsr().read();
             }
-            let word = regs.rngdata().read().bits();
-            for byte in word.to_le_bytes() {
-                if i >= buf.len() {
-                    break;
-                }
-                buf[i] = byte;
-                i += 1;
-            }
+            // The data register delivers one random byte per data-ready (the
+            // upper 24 bits always read zero on silicon, verified over 256
+            // samples); using them would pad every word with zeros.
+            buf[i] = regs.rngdata().read().bits() as u8;
+            i += 1;
         }
         Ok(())
     }

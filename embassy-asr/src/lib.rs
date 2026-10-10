@@ -60,6 +60,8 @@ pub mod spi;
 #[cfg(feature = "asr6601")]
 pub mod syscfg;
 #[cfg(feature = "asr6601")]
+pub mod time;
+#[cfg(feature = "asr6601")]
 pub mod timer;
 #[cfg(feature = "asr6601")]
 pub mod uart;
@@ -92,9 +94,8 @@ pub mod mode {
 
 #[cfg(feature = "asr6601")]
 embassy_hal_internal::interrupt_mod!(
-    SEC, RTC, WWDG, EFC, UART3, I2C2, UART0, UART1, UART2, LPUART, SSP0, SSP1, I2C0, I2C1, ADC, AFEC, SSP2,
-    DMAC1, DAC, LORA, GPIO, GPTIM0, GPTIM1, GPTIM2, GPTIM3, BSTIM0, BSTIM1, LPTIM0, SAC, DMAC0, I2S, LCD, PWR,
-    LPTIM1, IWDG,
+    SEC, RTC, WWDG, EFC, UART3, I2C2, UART0, UART1, UART2, LPUART, SSP0, SSP1, I2C0, I2C1, ADC, AFEC, SSP2, DMAC1, DAC,
+    LORA, GPIO, GPTIM0, GPTIM1, GPTIM2, GPTIM3, BSTIM0, BSTIM1, LPTIM0, SAC, DMAC0, I2S, LCD, PWR, LPTIM1, IWDG,
 );
 
 /// Bind interrupt vectors to HAL interrupt handlers.

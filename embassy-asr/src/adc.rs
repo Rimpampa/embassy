@@ -2,7 +2,7 @@
 //!
 //! Register programming follows the vendor `tremo_adc` driver and the SDK
 //! `adc/single_mode` / `adc/continue_mode` examples. Analog power-up and
-//! reference selection use the AFEC analog window via [`crate::afec::analog`].
+//! reference selection use the AFEC analog window (see `afec` module).
 //!
 //! # Documented external channels
 //!
@@ -57,20 +57,7 @@ pub const MAX_VALUE: u16 = 0x0fff;
 /// Internal reference voltage used by the SDK calibration examples (volts).
 pub const INTERNAL_VREF_VOLTS: f32 = 1.2;
 
-const CR_ENABLE: u32 = 1 << 0;
-const CR_DISABLE: u32 = 1 << 1;
-const CR_START: u32 = 1 << 2;
-const CR_STOP: u32 = 1 << 3;
-
 const CFGR_CLK_DIV_MASK: u32 = 0x0fff;
-const CFGR_DMA_ENABLE: u32 = 1 << 12;
-const CFGR_TRG_SOURCE_MASK: u32 = 0x1e000;
-const CFGR_TRG_POLARITY_MASK: u32 = 0x60000;
-const CFGR_OVERRUN_MODE: u32 = 1 << 19;
-const CFGR_CONV_MODE_MASK: u32 = 0x300000;
-const CFGR_CONV_MODE_SINGLE: u32 = 0x0;
-const CFGR_CONV_MODE_CONTINUE: u32 = 0x100000;
-const CFGR_WAIT_MODE: u32 = 1 << 22;
 
 /// Vendor `adc_init()`: clear AFEC analog REG_11 bits `[9:6]`.
 const ANALOG_11_ADC_INIT_MASK: u32 = 0xf << 6;
@@ -105,9 +92,8 @@ impl Handler<interrupt::typelevel::ADC> for InterruptHandler {
 
         if isr.overrun().bit_is_set() {
             OVERRUN.store(true, Ordering::Relaxed);
-            // PAC gap: ISR has no `Resettable` impl; write-1-to-clear via bits.
             unsafe {
-                regs.isr().write_with_zero(|w| w.bits(1 << 2));
+                regs.isr().write_with_zero(|w| w.overrun().set_bit());
             }
         }
 
@@ -375,15 +361,13 @@ impl Default for Config {
     }
 }
 
-/// ADC driver error.
+/// ADC driver error (conversion-time failures).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Error {
     /// Sequence was empty or longer than [`MAX_SEQUENCE_LEN`].
     InvalidSequence,
-    /// Clock divider exceeded `0xFFF`.
-    InvalidClockDivision,
     /// Differential mode is only defined for sample channels 1..=8.
     InvalidDifferentialChannel,
     /// Data register was overwritten before it was read.
@@ -398,7 +382,6 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidSequence => f.write_str("invalid ADC sequence"),
-            Self::InvalidClockDivision => f.write_str("invalid ADC clock division"),
             Self::InvalidDifferentialChannel => f.write_str("invalid differential channel"),
             Self::Overrun => f.write_str("ADC overrun"),
             Self::Busy => f.write_str("ADC conversion already running"),
@@ -408,6 +391,25 @@ impl core::fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+/// ADC configuration error (returned by constructors and channel setup).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// Clock divider exceeded `0xFFF`.
+    InvalidClockDivision,
+}
+
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidClockDivision => f.write_str("invalid ADC clock division"),
+        }
+    }
+}
+
+impl core::error::Error for ConfigError {}
 
 /// Owned ASR6601 ADC.
 pub struct Adc<'d, M: Mode = Blocking> {
@@ -419,7 +421,7 @@ pub struct Adc<'d, M: Mode = Blocking> {
 impl<'d> Adc<'d, Blocking> {
     /// Enable clocks, apply `config`, run vendor `adc_init`, and leave the ADC
     /// disabled until a conversion is started.
-    pub fn new_blocking(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, Error> {
+    pub fn new_blocking(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, ConfigError> {
         Self::new_inner(peri, config)
     }
 }
@@ -432,7 +434,7 @@ impl<'d> Adc<'d, Async> {
         peri: Peri<'d, peripherals::ADC>,
         _irq: impl Binding<interrupt::typelevel::ADC, InterruptHandler> + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let this = Self::new_inner(peri, config)?;
         interrupt::typelevel::ADC::unpend();
         interrupt::typelevel::ADC::set_priority(Priority::P3);
@@ -444,14 +446,28 @@ impl<'d> Adc<'d, Async> {
 }
 
 impl<'d, M: Mode> Adc<'d, M> {
-    fn new_inner(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, Error> {
+    fn new_inner(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, ConfigError> {
         if config.clock_division as u32 > CFGR_CLK_DIV_MASK {
-            return Err(Error::InvalidClockDivision);
+            return Err(ConfigError::InvalidClockDivision);
         }
 
         set_adc_clock_source(config.clock_source);
         let _ = rcc::enable_peripheral(Peripheral::Adc);
         let _ = rcc::reset_peripheral(Peripheral::Adc);
+
+        // Second-construction hygiene: a previous owner may have left a
+        // latched overrun, status flags, or armed enables behind (its Drop
+        // stops conversion but cannot retract an already-woken waiter).
+        OVERRUN.store(false, Ordering::Relaxed);
+        let regs = Self::regs();
+        unsafe {
+            regs.isr().write_with_zero(|w| {
+                w.eoc().set_bit();
+                w.eos().set_bit();
+                w.overrun().set_bit()
+            });
+            regs.ier().write_with_zero(|w| w);
+        }
 
         // Vendor `adc_init()`.
         analog::REG_11.modify(ANALOG_11_ADC_INIT_MASK, 0);
@@ -473,24 +489,21 @@ impl<'d, M: Mode> Adc<'d, M> {
 
     fn apply_cfgr_defaults(&self, config: Config) {
         let regs = Self::regs();
-        regs.cfgr().modify(|r, w| {
-            let mut bits = r.bits();
-            bits = (bits & !CFGR_CLK_DIV_MASK) | u32::from(config.clock_division);
-            // Soft trigger, rising/falling cleared.
-            bits &= !CFGR_TRG_SOURCE_MASK;
-            bits &= !CFGR_TRG_POLARITY_MASK;
-            if config.retain_on_overrun {
-                bits &= !CFGR_OVERRUN_MODE;
-            } else {
-                bits |= CFGR_OVERRUN_MODE;
+        regs.cfgr().modify(|_, w| {
+            unsafe {
+                w.clk_div().bits(config.clock_division);
             }
-            if config.wait_mode {
-                bits |= CFGR_WAIT_MODE;
-            } else {
-                bits &= !CFGR_WAIT_MODE;
+            // Soft trigger: ext select has no zero-valued PAC variant, so it
+            // is cleared raw (verified 0 = no external source); trigger
+            // selection uses the generated software-trigger writer.
+            unsafe {
+                w.ext_trig_sel().bits(0);
             }
-            bits = (bits & !CFGR_CONV_MODE_MASK) | CFGR_CONV_MODE_SINGLE;
-            unsafe { w.bits(bits) }
+            w.trig_sel().sw();
+            w.overrun_mode().bit(!config.retain_on_overrun);
+            w.wait_mode().bit(config.wait_mode);
+            w.conv_mode().variant(pac::adc::cfgr::ConvMode::Single);
+            w
         });
     }
 
@@ -553,6 +566,9 @@ impl<'d, M: Mode> Adc<'d, M> {
         }
 
         let regs = Self::regs();
+        // Sequence slots are 4-bit nibbles (`SEQR0.SEL0..7`, `SEQR1.SEL0..7`
+        // per the PAC field list); composing the two words directly keeps the
+        // slot loop instead of sixteen accessor calls.
         unsafe {
             regs.seqr0().write_with_zero(|w| w.bits(seqr0));
             regs.seqr1().write_with_zero(|w| w.bits(seqr1));
@@ -562,14 +578,7 @@ impl<'d, M: Mode> Adc<'d, M> {
 
     /// Enable or disable ADC DMA requests (`adc_enable_dma`).
     pub fn set_dma_enabled(&mut self, enabled: bool) {
-        Self::regs().cfgr().modify(|r, w| {
-            let bits = if enabled {
-                r.bits() | CFGR_DMA_ENABLE
-            } else {
-                r.bits() & !CFGR_DMA_ENABLE
-            };
-            unsafe { w.bits(bits) }
-        });
+        Self::regs().cfgr().modify(|_, w| w.dma_en().bit(enabled));
     }
 
     /// Address of `DR` for DMA source programming.
@@ -585,56 +594,58 @@ impl<'d, M: Mode> Adc<'d, M> {
     }
 
     fn set_conversion_mode(&self, mode: ConversionMode) {
-        let mode_bits = match mode {
-            ConversionMode::Single => CFGR_CONV_MODE_SINGLE,
-            ConversionMode::Continuous => CFGR_CONV_MODE_CONTINUE,
-        };
-        Self::regs().cfgr().modify(|r, w| {
-            let bits = (r.bits() & !CFGR_CONV_MODE_MASK) | mode_bits;
-            unsafe { w.bits(bits) }
+        Self::regs().cfgr().modify(|_, w| {
+            w.conv_mode().variant(match mode {
+                ConversionMode::Single => pac::adc::cfgr::ConvMode::Single,
+                ConversionMode::Continuous => pac::adc::cfgr::ConvMode::Continuous,
+            })
         });
     }
 
     fn enable(&self) {
         let regs = Self::regs();
-        if regs.cr().read().bits() == 0 {
-            regs.cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_ENABLE) });
+        let cr = regs.cr().read();
+        if cr.en().bit_is_clear() && cr.dis().bit_is_clear() && cr.start().bit_is_clear() && cr.stop().bit_is_clear() {
+            regs.cr().modify(|_, w| w.en().set_bit());
         }
     }
 
     fn disable(&self) {
         let regs = Self::regs();
-        let cr = regs.cr().read().bits();
-        if cr & CR_ENABLE != 0 && cr & CR_START == 0 {
-            regs.cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_DISABLE) });
+        let cr = regs.cr().read();
+        if cr.en().bit_is_set() && cr.start().bit_is_clear() {
+            regs.cr().modify(|_, w| w.dis().set_bit());
         }
     }
 
     fn start(&self) {
         let regs = Self::regs();
-        let cr = regs.cr().read().bits();
-        if cr & CR_ENABLE != 0 && cr & CR_DISABLE == 0 {
-            regs.cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_START) });
+        let cr = regs.cr().read();
+        if cr.en().bit_is_set() && cr.dis().bit_is_clear() {
+            regs.cr().modify(|_, w| w.start().set_bit());
         }
     }
 
     fn stop(&self) {
         let regs = Self::regs();
-        if regs.cr().read().bits() & CR_START != 0 {
-            regs.cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_STOP) });
+        if regs.cr().read().start().bit_is_set() {
+            regs.cr().modify(|_, w| w.stop().set_bit());
         }
     }
 
     fn read_dr(&self) -> u16 {
-        (Self::regs().dr().read().bits() & u32::from(MAX_VALUE)) as u16
+        Self::regs().dr().read().data().bits()
     }
 
     fn clear_status(&self) {
         let regs = Self::regs();
         // ISR is write-1-to-clear for documented flags.
-        // PAC gap: ISR is not `Resettable`, so use `write_with_zero`.
         unsafe {
-            regs.isr().write_with_zero(|w| w.bits((1 << 0) | (1 << 1) | (1 << 2)));
+            regs.isr().write_with_zero(|w| {
+                w.eoc().set_bit();
+                w.eos().set_bit();
+                w.overrun().set_bit()
+            });
         }
     }
 
@@ -741,16 +752,28 @@ impl<'d, M: Mode> Adc<'d, M> {
 impl<'d> Adc<'d, Async> {
     async fn wait_eoc(&self) -> Result<(), Error> {
         poll_fn(|cx| {
+            // Register before checking: an EOC that fires between the check
+            // and the registration must still wake us via the re-check below.
+            WAKER.register(cx.waker());
             if self.take_overrun() {
+                Self::regs().ier().modify(|_, w| {
+                    w.eoc_int_en().clear_bit();
+                    w.eos_int_en().clear_bit();
+                    w.overrun_int_en().clear_bit()
+                });
                 return Poll::Ready(Err(Error::Overrun));
             }
 
             let regs = Self::regs();
             if regs.isr().read().eoc().bit_is_set() {
+                regs.ier().modify(|_, w| {
+                    w.eoc_int_en().clear_bit();
+                    w.eos_int_en().clear_bit();
+                    w.overrun_int_en().clear_bit()
+                });
                 return Poll::Ready(Ok(()));
             }
 
-            WAKER.register(cx.waker());
             // Enable EOC (+ overrun) after registering to avoid lost wakes.
             regs.ier().modify(|_, w| {
                 w.eoc_int_en().set_bit();

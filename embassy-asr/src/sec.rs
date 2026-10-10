@@ -40,6 +40,12 @@ impl<'d> Sec<'d> {
     }
 }
 
+impl Drop for Sec<'_> {
+    fn drop(&mut self) {
+        let _ = rcc::disable_peripheral(Peripheral::Sec);
+    }
+}
+
 /// Crate-private helpers used by the flash driver.
 pub(crate) mod flash_access {
     use crate::pac;

@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use core::task::Poll;
 
 use embassy_futures::join::join;
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal::spi::{Mode as SpiMode, Phase, Polarity};
@@ -27,6 +28,7 @@ use crate::interrupt::typelevel::{Binding, Handler, Interrupt as TypelevelInterr
 use crate::mode::{Async, Blocking, Mode};
 use crate::pac::ssp0::RegisterBlock;
 use crate::rcc::{self, Peripheral};
+use crate::time::Hertz;
 use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
 // PL022 / tremo_spi register layout is fully described by the PAC field
@@ -42,32 +44,51 @@ const RESULT_OVERRUN: u8 = 1;
 pub enum Error {
     /// RX FIFO overrun (ROR).
     Overrun,
+    /// Embedded-hal byte transfers require [`DataWidth::Bits8`].
+    InvalidDataWidth,
+    /// DMA transfer failed.
+    Dma(dma::Error),
+}
+
+/// SPI configuration error (returned by constructors and `set_config`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum ConfigError {
     /// Requested SCLK cannot be formed from the current PCLK dividers.
     InvalidFrequency,
     /// LSB-first transfers are not supported by the PL022 Motorola frame format.
     UnsupportedBitOrder,
-    /// Embedded-hal byte transfers require [`DataWidth::Bits8`].
-    InvalidDataWidth,
     /// Peripheral clocks are not published yet (`rcc::init` has not completed).
     ClocksNotInitialized,
-    /// DMA transfer failed.
-    Dma(dma::Error),
+    /// RCC rejected the clock or reset request.
+    Rcc(rcc::Error),
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Overrun => f.write_str("SPI RX overrun"),
-            Self::InvalidFrequency => f.write_str("SPI frequency is out of range"),
-            Self::UnsupportedBitOrder => f.write_str("SPI LSB-first is unsupported"),
             Self::InvalidDataWidth => f.write_str("SPI data width is not 8 bit"),
-            Self::ClocksNotInitialized => f.write_str("RCC clocks are not initialized"),
             Self::Dma(err) => write!(f, "SPI DMA error: {err}"),
         }
     }
 }
 
 impl core::error::Error for Error {}
+
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidFrequency => f.write_str("SPI frequency is out of range"),
+            Self::UnsupportedBitOrder => f.write_str("SPI LSB-first is unsupported"),
+            Self::ClocksNotInitialized => f.write_str("RCC clocks are not initialized"),
+            Self::Rcc(err) => write!(f, "SPI RCC error: {err}"),
+        }
+    }
+}
+
+impl core::error::Error for ConfigError {}
 
 impl embedded_hal::spi::Error for Error {
     fn kind(&self) -> embedded_hal::spi::ErrorKind {
@@ -81,7 +102,7 @@ impl embedded_hal::spi::Error for Error {
 /// Bit order.
 ///
 /// The ASR6601 SSP Motorola frame format only shifts MSB first. Selecting
-/// [`BitOrder::LsbFirst`] returns [`Error::UnsupportedBitOrder`].
+/// [`BitOrder::LsbFirst`] returns [`ConfigError::UnsupportedBitOrder`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum BitOrder {
@@ -127,8 +148,8 @@ impl DataWidth {
 pub struct Config {
     /// SPI mode (clock polarity / phase).
     pub mode: SpiMode,
-    /// Desired SCLK frequency in hertz.
-    pub frequency: u32,
+    /// Desired SCLK frequency.
+    pub frequency: Hertz,
     /// Bit order. Only [`BitOrder::MsbFirst`] is accepted.
     pub bit_order: BitOrder,
     /// Frame data width.
@@ -144,7 +165,7 @@ impl Default for Config {
                 polarity: Polarity::IdleLow,
                 phase: Phase::CaptureOnFirstTransition,
             },
-            frequency: 1_000_000,
+            frequency: Hertz(1_000_000),
             bit_order: BitOrder::MsbFirst,
             data_width: DataWidth::Bits8,
             frame_format: FrameFormat::Motorola,
@@ -158,7 +179,7 @@ impl defmt::Format for Config {
         defmt::write!(
             f,
             "Config {{ frequency: {=u32}, bit_order: {}, data_width: {}, frame_format: {} }}",
-            self.frequency,
+            self.frequency.hz(),
             self.bit_order,
             self.data_width,
             self.frame_format,
@@ -245,7 +266,6 @@ pub struct Spi<'d, M: Mode> {
     _sck: Option<Flex<'d>>,
     _mosi: Option<Flex<'d>>,
     _miso: Option<Flex<'d>>,
-    _nss: Option<Flex<'d>>,
     tx_dma: Option<dma::Channel<'d, Async>>,
     rx_dma: Option<dma::Channel<'d, Async>>,
     data_width: DataWidth,
@@ -275,9 +295,9 @@ fn sck_pull(mode: SpiMode) -> Pull {
     }
 }
 
-fn calc_dividers(pclk: u32, freq: u32) -> Result<(u8, u8), Error> {
+fn calc_dividers(pclk: u32, freq: u32) -> Result<(u8, u8), ConfigError> {
     if freq == 0 || pclk == 0 {
-        return Err(Error::InvalidFrequency);
+        return Err(ConfigError::InvalidFrequency);
     }
 
     // SCLK = PCLK / (CPSDVSR * (SCR + 1)), CPSDVSR even in 2..=254, SCR in 0..=255.
@@ -311,7 +331,7 @@ fn calc_dividers(pclk: u32, freq: u32) -> Result<(u8, u8), Error> {
         }
     }
 
-    best.map(|(c, s, _)| (c, s)).ok_or(Error::InvalidFrequency)
+    best.map(|(c, s, _)| (c, s)).ok_or(ConfigError::InvalidFrequency)
 }
 
 impl<'d, M: Mode> Spi<'d, M> {
@@ -320,12 +340,11 @@ impl<'d, M: Mode> Spi<'d, M> {
         sck: Option<Flex<'d>>,
         mosi: Option<Flex<'d>>,
         miso: Option<Flex<'d>>,
-        nss: Option<Flex<'d>>,
         tx_dma: Option<dma::Channel<'d, Async>>,
         rx_dma: Option<dma::Channel<'d, Async>>,
         config: Config,
         enable_irq: bool,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let info = T::info();
 
         let _ = rcc::enable_peripheral(info.peripheral);
@@ -336,7 +355,6 @@ impl<'d, M: Mode> Spi<'d, M> {
             _sck: sck,
             _mosi: mosi,
             _miso: miso,
-            _nss: nss,
             tx_dma,
             rx_dma,
             data_width: config.data_width,
@@ -366,17 +384,17 @@ impl<'d, M: Mode> Spi<'d, M> {
         Ok(spi)
     }
 
-    fn configure(&mut self, config: &Config) -> Result<(), Error> {
+    fn configure(&mut self, config: &Config) -> Result<(), ConfigError> {
         if config.bit_order == BitOrder::LsbFirst {
-            return Err(Error::UnsupportedBitOrder);
+            return Err(ConfigError::UnsupportedBitOrder);
         }
 
-        let clocks = rcc::clocks().ok_or(Error::ClocksNotInitialized)?;
+        let clocks = rcc::clocks().ok_or(ConfigError::ClocksNotInitialized)?;
         let pclk = match self.info.pclk {
             PclkSel::Pclk0 => clocks.pclk0_hz,
             PclkSel::Pclk1 => clocks.pclk1_hz,
         };
-        let (cpsdvsr, scr) = calc_dividers(pclk, config.frequency)?;
+        let (cpsdvsr, scr) = calc_dividers(pclk, config.frequency.hz())?;
 
         let dss = match config.data_width {
             DataWidth::Bits4 => pac::ssp0::cr0::Dss::Value4,
@@ -468,20 +486,20 @@ impl<'d, M: Mode> Spi<'d, M> {
     }
 
     /// Reconfigure the SPI peripheral.
-    pub fn set_config(&mut self, config: &Config) -> Result<(), Error> {
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
         self.configure(config)?;
         self.set_enabled(true);
         Ok(())
     }
 
     /// Change only the SCLK frequency.
-    pub fn set_frequency(&mut self, frequency: u32) -> Result<(), Error> {
-        let clocks = rcc::clocks().ok_or(Error::ClocksNotInitialized)?;
+    pub fn set_frequency(&mut self, frequency: Hertz) -> Result<(), ConfigError> {
+        let clocks = rcc::clocks().ok_or(ConfigError::ClocksNotInitialized)?;
         let pclk = match self.info.pclk {
             PclkSel::Pclk0 => clocks.pclk0_hz,
             PclkSel::Pclk1 => clocks.pclk1_hz,
         };
-        let (cpsdvsr, scr) = calc_dividers(pclk, frequency)?;
+        let (cpsdvsr, scr) = calc_dividers(pclk, frequency.hz())?;
         self.set_enabled(false);
         unsafe {
             let regs = &*self.info.regs;
@@ -597,14 +615,13 @@ impl<'d> Spi<'d, Blocking> {
         mosi: Peri<'d, Mosi>,
         miso: Peri<'d, Miso>,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, Sck::AF, pull)),
             Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            None,
             None,
             None,
             config,
@@ -622,14 +639,13 @@ impl<'d> Spi<'d, Blocking> {
         miso: Peri<'d, impl GpioPin + 'd>,
         miso_af: AlternateFunction,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, sck_af, pull)),
             Some(configure_output_af(mosi, mosi_af, Pull::None)),
             Some(configure_input_af(miso, miso_af, Pull::None)),
-            None,
             None,
             None,
             config,
@@ -643,13 +659,12 @@ impl<'d> Spi<'d, Blocking> {
         sck: Peri<'d, Sck>,
         mosi: Peri<'d, Mosi>,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, Sck::AF, pull)),
             Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
-            None,
             None,
             None,
             None,
@@ -664,37 +679,13 @@ impl<'d> Spi<'d, Blocking> {
         sck: Peri<'d, Sck>,
         miso: Peri<'d, Miso>,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, Sck::AF, pull)),
             None,
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            None,
-            None,
-            None,
-            config,
-            false,
-        )
-    }
-
-    /// Blocking master that also muxes the hardware NSS/FSS pin.
-    pub fn new_blocking_with_nss<T: Instance, Sck: SckPin<T>, Mosi: MosiPin<T>, Miso: MisoPin<T>, Nss: NssPin<T>>(
-        spi: Peri<'d, T>,
-        sck: Peri<'d, Sck>,
-        mosi: Peri<'d, Mosi>,
-        miso: Peri<'d, Miso>,
-        nss: Peri<'d, Nss>,
-        config: Config,
-    ) -> Result<Self, Error> {
-        let pull = sck_pull(config.mode);
-        Self::new_inner::<T>(
-            spi,
-            Some(configure_output_af(sck, Sck::AF, pull)),
-            Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
-            Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            Some(configure_output_af(nss, Nss::AF, Pull::Up)),
             None,
             None,
             config,
@@ -712,14 +703,13 @@ impl<'d> Spi<'d, Async> {
         miso: Peri<'d, Miso>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, Sck::AF, pull)),
             Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            None,
             None,
             None,
             config,
@@ -738,7 +728,7 @@ impl<'d> Spi<'d, Async> {
         miso_af: AlternateFunction,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         Self::new_inner::<T>(
             spi,
@@ -746,6 +736,47 @@ impl<'d> Spi<'d, Async> {
             Some(configure_output_af(mosi, mosi_af, Pull::None)),
             Some(configure_input_af(miso, miso_af, Pull::None)),
             None,
+            None,
+            config,
+            true,
+        )
+    }
+
+    /// Create an async transmit-only master (MOSI + SCK only).
+    pub fn new_txonly<T: Instance, Sck: SckPin<T>, Mosi: MosiPin<T>>(
+        spi: Peri<'d, T>,
+        sck: Peri<'d, Sck>,
+        mosi: Peri<'d, Mosi>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        config: Config,
+    ) -> Result<Self, ConfigError> {
+        let pull = sck_pull(config.mode);
+        Self::new_inner::<T>(
+            spi,
+            Some(configure_output_af(sck, Sck::AF, pull)),
+            Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
+            None,
+            None,
+            None,
+            config,
+            true,
+        )
+    }
+
+    /// Create an async receive-only master (MISO + SCK only).
+    pub fn new_rxonly<T: Instance, Sck: SckPin<T>, Miso: MisoPin<T>>(
+        spi: Peri<'d, T>,
+        sck: Peri<'d, Sck>,
+        miso: Peri<'d, Miso>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        config: Config,
+    ) -> Result<Self, ConfigError> {
+        let pull = sck_pull(config.mode);
+        Self::new_inner::<T>(
+            spi,
+            Some(configure_output_af(sck, Sck::AF, pull)),
+            None,
+            Some(configure_input_af(miso, Miso::AF, Pull::None)),
             None,
             None,
             config,
@@ -777,7 +808,7 @@ impl<'d> Spi<'d, Async> {
         + Copy
         + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let pull = sck_pull(config.mode);
         let tx = dma::Channel::new(tx_dma, irq);
         let rx = dma::Channel::new(rx_dma, irq);
@@ -786,7 +817,6 @@ impl<'d> Spi<'d, Async> {
             Some(configure_output_af(sck, Sck::AF, pull)),
             Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            None,
             Some(tx),
             Some(rx),
             config,
@@ -804,12 +834,15 @@ impl<'d> Spi<'d, Async> {
         ready: impl Fn(&Self) -> bool,
         enable_irqs: impl Fn(&RegisterBlock, bool),
     ) -> Result<(), Error> {
-        poll_fn(|cx| {
+        let regs = unsafe { &*self.info.regs };
+        // If dropped mid-wait the FIFO interrupts would stay armed with no
+        // waiter; disarm them. Fast paths never arm, so defuse is a no-op.
+        let irq_guard = OnDrop::new(|| enable_irqs(regs, false));
+        let result = poll_fn(|cx| {
             self.info.state.waker.register(cx.waker());
             if let Err(e) = self.take_error() {
                 return Poll::Ready(Err(e));
             }
-            let regs = unsafe { &*self.info.regs };
             if ready(self) {
                 return Poll::Ready(Ok(()));
             }
@@ -822,7 +855,9 @@ impl<'d> Spi<'d, Async> {
             }
             Poll::Pending
         })
-        .await
+        .await;
+        irq_guard.defuse();
+        result
     }
 
     async fn wait_tnf(&mut self) -> Result<(), Error> {
@@ -1022,6 +1057,17 @@ impl<'d> Spi<'d, Async> {
     }
 }
 
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Spi<'d, M> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
+    }
+}
+
 impl<'d, M: Mode> Drop for Spi<'d, M> {
     fn drop(&mut self) {
         self.set_enabled(false);
@@ -1095,12 +1141,6 @@ pub trait MisoPin<T: Instance>: GpioPin {
     const AF: AlternateFunction;
 }
 
-/// NSS / SSP_FSS pin for an SSP instance.
-pub trait NssPin<T: Instance>: GpioPin {
-    /// Datasheet alternate-function number for this pin/signal.
-    const AF: AlternateFunction;
-}
-
 macro_rules! impl_pin {
     ($pin:ident, $instance:ident, $trait:ident, $af:ident) => {
         impl $trait<peripherals::$instance> for peripherals::$pin {
@@ -1111,29 +1151,23 @@ macro_rules! impl_pin {
 
 // Table 4-4: every documented SSP remap uses Fun=4.
 impl_pin!(PA0, SSP0, SckPin, Function4);
-impl_pin!(PA1, SSP0, NssPin, Function4);
 impl_pin!(PA2, SSP0, MosiPin, Function4);
 impl_pin!(PA3, SSP0, MisoPin, Function4);
 impl_pin!(PB7, SSP0, MisoPin, Function4);
 impl_pin!(PC12, SSP0, SckPin, Function4);
-impl_pin!(PC13, SSP0, NssPin, Function4);
 impl_pin!(PC15, SSP0, MisoPin, Function4);
 
 impl_pin!(PA4, SSP1, SckPin, Function4);
-impl_pin!(PA5, SSP1, NssPin, Function4);
 impl_pin!(PA6, SSP1, MosiPin, Function4);
 impl_pin!(PA7, SSP1, MisoPin, Function4);
 impl_pin!(PB8, SSP1, SckPin, Function4);
-impl_pin!(PB9, SSP1, NssPin, Function4);
 impl_pin!(PB10, SSP1, MosiPin, Function4);
 impl_pin!(PB11, SSP1, MisoPin, Function4);
 
 impl_pin!(PA8, SSP2, SckPin, Function4);
-impl_pin!(PA9, SSP2, NssPin, Function4);
 impl_pin!(PA10, SSP2, MosiPin, Function4);
 impl_pin!(PA11, SSP2, MisoPin, Function4);
 impl_pin!(PB12, SSP2, SckPin, Function4);
-impl_pin!(PB13, SSP2, NssPin, Function4);
 impl_pin!(PB14, SSP2, MosiPin, Function4);
 impl_pin!(PB15, SSP2, MisoPin, Function4);
 
