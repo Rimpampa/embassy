@@ -22,6 +22,7 @@ use embassy_sync::waitqueue::AtomicWaker;
 use crate::gpio::{AlternateFunction, Flex, Pin as GpioPin, Pull};
 use crate::interrupt::typelevel::{Binding, Handler, Interrupt as TypelevelInterrupt};
 use crate::rcc::{self, Peripheral as RccPeripheral};
+use crate::time::Hertz;
 use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
 const CR1_CEN: u32 = 1 << 0;
@@ -462,7 +463,8 @@ async fn wait_for_flags<T: Instance>(flags: InterruptFlags) -> InterruptFlags {
     .await
 }
 
-fn compute_psc_arr(pclk: u32, frequency_hz: u32) -> Result<(u16, u16), Error> {
+fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), Error> {
+    let frequency_hz = frequency.hz();
     if frequency_hz == 0 || pclk == 0 {
         return Err(Error::InvalidFrequency);
     }
@@ -681,11 +683,26 @@ pub struct Timer<'d, T: Instance> {
 
 impl<'d, T: Instance> Timer<'d, T> {
     /// Enable clocks, reset the block, apply `config`, and leave the counter stopped.
+    ///
+    /// Does not bind the update interrupt; use [`Self::new`] for
+    /// interrupt-driven use.
+    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+        Self::create(peri, config)
+    }
+
+    /// Enable clocks, reset the block, apply `config`, and leave the counter stopped.
+    ///
+    /// `irq` proves the timer update vector is bound; interrupt-driven
+    /// waits arm it on demand.
     pub fn new(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
+        Self::create(peri, config)
+    }
+
+    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
         enable_instance::<T>()?;
         let this = Self { _peri: peri };
         apply_basic_config::<T>(config);
@@ -891,7 +908,7 @@ pub struct SimplePwm<'d, T: Instance> {
 }
 
 impl<'d, T: Instance> SimplePwm<'d, T> {
-    /// Create a PWM timer at `frequency_hz`, optionally attaching channel pins.
+    /// Create a PWM timer at `frequency`, optionally attaching channel pins.
     pub fn new(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
@@ -899,7 +916,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         ch1: Option<PwmPin<'d, T, Ch1>>,
         ch2: Option<PwmPin<'d, T, Ch2>>,
         ch3: Option<PwmPin<'d, T, Ch3>>,
-        frequency_hz: u32,
+        frequency: Hertz,
         pwm: PwmConfig,
     ) -> Result<Self, Error> {
         enable_instance::<T>()?;
@@ -907,7 +924,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         let pclk = T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
             .ok_or(Error::ClockUnavailable)?;
-        let (prescaler, period) = compute_psc_arr(pclk, frequency_hz)?;
+        let (prescaler, period) = compute_psc_arr(pclk, frequency)?;
 
         apply_basic_config::<T>(Config {
             prescaler,

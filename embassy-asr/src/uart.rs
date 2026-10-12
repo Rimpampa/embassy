@@ -527,6 +527,19 @@ fn shutdown(info: &'static Info) {
     let _ = rcc::disable_peripheral(info.rcc);
 }
 
+/// Enable or disable the receive interrupt group (RX, receive-timeout,
+/// and all receive-error sources).
+fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
+    regs.imsc().modify(|_, w| {
+        w.rxim().bit(enable);
+        w.rtim().bit(enable);
+        w.feim().bit(enable);
+        w.peim().bit(enable);
+        w.beim().bit(enable);
+        w.oeim().bit(enable)
+    });
+}
+
 fn flag(regs: &RegisterBlock, mask: u32) -> bool {
     regs.fr().read().bits() & mask != 0
 }
@@ -592,35 +605,34 @@ pub struct UartRx<'d, M: Mode> {
 impl<'d> Uart<'d, Blocking> {
     /// Create a blocking UART.
     ///
-    /// `rx` / `tx` are `(pin, alternate_function)` pairs. Supply `None` for
+    /// `tx` / `rx` are `(pin, alternate_function)` pairs. Supply `None` for
     /// unused directions. Flow-control pins are not configured here; use
     /// [`Self::new_blocking_with_flow_control`] when RTS/CTS are required.
     pub fn new_blocking<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner::<T>(peri, erase_pin(rx), erase_pin(tx), None, None, config, false)
+        Self::new_inner::<T>(peri, erase_pin(tx), erase_pin(rx), None, None, config)
     }
 
     /// Create a blocking UART with explicit RTS/CTS pins and AF selectors.
     pub fn new_blocking_with_flow_control<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
     ) -> Result<Self, ConfigError> {
         Self::new_inner::<T>(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
-            false,
         )
     }
 }
@@ -631,33 +643,38 @@ impl<'d> Uart<'d, Async> {
     /// `irq` proves the UART vector is bound to [`InterruptHandler<T>`].
     pub fn new<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner::<T>(peri, erase_pin(rx), erase_pin(tx), None, None, config, true)
+        let has_rx = rx.is_some();
+        let this = Self::new_inner::<T>(peri, erase_pin(tx), erase_pin(rx), None, None, config)?;
+        this.enable_interrupts::<T>(has_rx);
+        Ok(this)
     }
 
     /// Create an asynchronous UART with explicit RTS/CTS pins and AF selectors.
     pub fn new_with_flow_control<T: Instance>(
         peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner::<T>(
+        let has_rx = rx.is_some();
+        let this = Self::new_inner::<T>(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
-            true,
-        )
+        )?;
+        this.enable_interrupts::<T>(has_rx);
+        Ok(this)
     }
 
     /// Write `buffer` using interrupt-driven TX.
@@ -690,14 +707,37 @@ impl<'d> Uart<'d, Async> {
 }
 
 impl<'d, M: Mode> Uart<'d, M> {
+    /// Arm the NVIC vector and, when receiving, the RX drain interrupt.
+    ///
+    /// Called by the async constructors only; blocking instances never
+    /// enable the vector. The RX path keeps its interrupt armed; see
+    /// [`InterruptHandler::on_interrupt`].
+    fn enable_interrupts<T: Instance>(&self, has_rx: bool) {
+        let info = self.tx.info;
+        // Arm the RX interrupt so the ISR starts draining the hardware FIFO
+        // into the ring buffer immediately.
+        if has_rx {
+            set_rx_interrupts(info.regs(), true);
+        }
+        T::Interrupt::unpend();
+        // Run above the RTC time-driver (P2) and DMA (P2) interrupts. The
+        // RTC fires at 32.768 kHz and its handler can spin in `wait_sync()`
+        // across the async clock domain; at P3 the UART RX ISR is starved
+        // during those windows and the 16-byte hardware RX FIFO overruns,
+        // dropping bytes. At P1 capture is never delayed by the time driver.
+        T::Interrupt::set_priority(Priority::P1);
+        unsafe {
+            T::Interrupt::enable();
+        }
+    }
+
     fn new_inner<T: Instance>(
         _peri: Peri<'d, T>,
-        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         tx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         rts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         cts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         config: Config,
-        enable_irq: bool,
     ) -> Result<Self, ConfigError> {
         match config.flow_control {
             FlowControl::Rts if rts.is_none() => return Err(ConfigError::MissingFlowControlPin),
@@ -722,25 +762,6 @@ impl<'d, M: Mode> Uart<'d, M> {
         apply_config(info, config, has_rx, has_tx)?;
 
         info.state.refcount.store(2, Ordering::Release);
-
-        if enable_irq {
-            // Arm the RX interrupt so the ISR starts draining the hardware FIFO
-            // into the ring buffer immediately. The RX path keeps this armed;
-            // see [`InterruptHandler::on_interrupt`].
-            if has_rx {
-                set_imsc_bits(info.regs(), INT_RX_ALL, true);
-            }
-            T::Interrupt::unpend();
-            // Run above the RTC time-driver (P2) and DMA (P2) interrupts. The
-            // RTC fires at 32.768 kHz and its handler can spin in `wait_sync()`
-            // across the async clock domain; at P3 the UART RX ISR is starved
-            // during those windows and the 16-byte hardware RX FIFO overruns,
-            // dropping bytes. At P1 capture is never delayed by the time driver.
-            T::Interrupt::set_priority(Priority::P1);
-            unsafe {
-                T::Interrupt::enable();
-            }
-        }
 
         Ok(Self {
             tx: UartTx {
@@ -783,6 +804,11 @@ impl<'d, M: Mode> Uart<'d, M> {
         self.tx.blocking_flush()
     }
 
+    /// Whether the transmitter is currently busy sending a frame.
+    pub fn busy(&self) -> bool {
+        self.tx.busy()
+    }
+
     /// Blocking DMA write.
     pub fn blocking_write_dma(&mut self, channel: &mut DmaChannel<'_, Blocking>, buffer: &[u8]) -> Result<(), Error> {
         self.tx.blocking_write_dma(channel, buffer)
@@ -818,6 +844,11 @@ impl<'d, M: Mode> UartTx<'d, M> {
         let regs = self.regs();
         while !flag(regs, FLAG_TXFE) || flag(regs, FLAG_BUSY) {}
         Ok(())
+    }
+
+    /// Whether the transmitter is currently busy sending a frame.
+    pub fn busy(&self) -> bool {
+        self.regs().fr().read().busy().bit_is_set()
     }
 
     /// Blocking DMA write.
