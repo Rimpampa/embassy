@@ -59,6 +59,14 @@ pub struct Flash<'d> {
     size: u32,
 }
 
+impl Drop for Flash<'_> {
+    fn drop(&mut self) {
+        // Nothing to tear down: the EFC has no RCC gate in this HAL, and an
+        // in-progress program/erase runs to completion in hardware once
+        // started (all blocking calls poll it before returning).
+    }
+}
+
 impl<'d> Flash<'d> {
     /// Create a flash driver.
     ///
