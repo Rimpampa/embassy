@@ -20,6 +20,7 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal::i2c::Operation as EhOperation;
@@ -61,6 +62,8 @@ impl IrqEnables {
 }
 
 const SR_RW_MODE: u32 = 1 << 17;
+
+const BLOCKING_POLL_LIMIT: u32 = 1_000_000;
 
 /// I2C transfer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,7 +623,7 @@ impl<'d, M: Mode> I2c<'d, M> {
 
     fn blocking_wait_tx_empty(&self) -> Result<(), Error> {
         let regs = self.regs();
-        loop {
+        for _ in 0..BLOCKING_POLL_LIMIT {
             check_errors(regs)?;
             if regs.sr().read().idbr_empty().bit_is_set() {
                 clear_tx_empty(regs);
@@ -629,18 +632,22 @@ impl<'d, M: Mode> I2c<'d, M> {
                 }
                 return Ok(());
             }
+            core::hint::spin_loop();
         }
+        Err(self.finish_error(Error::Timeout))
     }
 
     fn blocking_wait_rx_full(&self) -> Result<(), Error> {
         let regs = self.regs();
-        loop {
+        for _ in 0..BLOCKING_POLL_LIMIT {
             check_errors(regs)?;
             if regs.sr().read().dbr_full().bit_is_set() {
                 clear_rx_full(regs);
                 return Ok(());
             }
+            core::hint::spin_loop();
         }
+        Err(self.finish_error(Error::Timeout))
     }
 
     fn blocking_write_ops(&mut self, addr: u8, bytes: &[u8], send_stop: bool) -> Result<(), Error> {
@@ -755,7 +762,10 @@ impl<'d> I2c<'d, Async> {
         };
         let off = IrqEnables::default();
 
-        poll_fn(|cx| {
+        // If dropped mid-wait the armed enables would outlive the waiter and
+        // the ISR would keep firing with nothing to wake; disarm them.
+        let irq_guard = OnDrop::new(|| set_irq_enables(regs, off));
+        let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
             let outcome = match ready(regs) {
                 Poll::Ready(result) => {
@@ -779,7 +789,9 @@ impl<'d> I2c<'d, Async> {
             };
             outcome
         })
-        .await
+        .await;
+        irq_guard.defuse();
+        result
     }
 
     async fn wait_tx_empty(&mut self) -> Result<(), Error> {
@@ -1148,6 +1160,10 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
     }
 
     /// Block until the slave address is detected; return the transfer direction.
+    ///
+    /// Deliberately unbounded: a slave's job is to wait for a master, and a
+    /// quiet bus is idle, not wedged. Pair with `embassy_time::with_timeout`
+    /// if the application needs a deadline.
     pub fn blocking_listen(&mut self) -> Result<SlaveOp, Error> {
         let regs = self.regs();
         loop {
@@ -1236,7 +1252,10 @@ impl<'d> I2cSlave<'d, Async> {
         };
         let off = IrqEnables::default();
 
-        poll_fn(|cx| {
+        // If dropped mid-wait the armed enables would outlive the waiter and
+        // the ISR would keep firing with nothing to wake; disarm them.
+        let irq_guard = OnDrop::new(|| set_irq_enables(regs, off));
+        let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
             match ready(regs) {
                 Poll::Ready(result) => {
@@ -1255,10 +1274,14 @@ impl<'d> I2cSlave<'d, Async> {
                 }
             }
         })
-        .await
+        .await;
+        irq_guard.defuse();
+        result
     }
 
     /// Wait until the slave address is detected; return the transfer direction.
+    ///
+    /// Deliberately without timeout (see [`I2cSlave::blocking_listen`]).
     pub async fn listen(&mut self) -> Result<SlaveOp, Error> {
         let mut op = SlaveOp::Read;
         self.wait_mask(

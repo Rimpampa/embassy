@@ -35,6 +35,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, Ordering, compiler_fence};
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -990,6 +991,9 @@ impl<'d> LpuartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        // If dropped mid-byte the TX interrupt would stay armed with no
+        // waiter; disarm it.
+        let irq_guard = OnDrop::new(|| set_tx_empty_interrupt(regs, false));
         for &byte in buffer {
             poll_fn(|cx| {
                 if tx_empty(regs) {
@@ -1006,6 +1010,7 @@ impl<'d> LpuartTx<'d, Async> {
             .await;
             write_data(regs, byte);
         }
+        irq_guard.defuse();
         set_tx_empty_interrupt(regs, false);
         Ok(())
     }
@@ -1017,6 +1022,7 @@ impl<'d> LpuartTx<'d, Async> {
         if tx_empty(regs) && !tx_done(regs) {
             return Ok(());
         }
+        let irq_guard = OnDrop::new(|| set_tx_done_interrupt(regs, false));
         poll_fn(|cx| {
             if tx_done(regs) {
                 return Poll::Ready(());
@@ -1030,6 +1036,7 @@ impl<'d> LpuartTx<'d, Async> {
             Poll::Pending
         })
         .await;
+        irq_guard.defuse();
         set_tx_done_interrupt(regs, false);
         clear_tx_done(regs);
         Ok(())
@@ -1044,6 +1051,9 @@ impl<'d> LpuartTx<'d, Async> {
         let dest = regs.data().as_ptr();
         set_dma_req(regs, true, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, true, false));
         let result = unsafe {
             channel
                 .write(buffer, dest.cast::<u8>(), self.info.dma_tx, TransferOptions::default())
@@ -1051,6 +1061,7 @@ impl<'d> LpuartTx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, true, false);
         result
     }
@@ -1160,6 +1171,9 @@ impl<'d> LpuartRx<'d, Async> {
         let src = regs.data().as_ptr();
         set_dma_req(regs, false, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, false, false));
         let result = unsafe {
             channel
                 .read(src.cast::<u8>(), buffer, self.info.dma_rx, TransferOptions::default())
@@ -1167,6 +1181,7 @@ impl<'d> LpuartRx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, false, false);
         result
     }

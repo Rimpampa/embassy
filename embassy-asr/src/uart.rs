@@ -21,6 +21,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering, compiler_fence};
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -36,9 +37,6 @@ use crate::{interrupt, pac, peripherals};
 const RCO4M_HZ: u32 = 3_600_000;
 const XO32K_HZ: u32 = 32_768;
 const XO24M_HZ: u32 = 24_000_000;
-
-// Backs the async TX path until the async-wait rework replaces it.
-const INT_TX: u32 = 1 << 5;
 
 /// Capacity of the per-UART software RX ring buffer.
 ///
@@ -546,6 +544,10 @@ fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
     });
 }
 
+/// Enable or disable the transmit interrupt.
+fn set_tx_interrupt(regs: &RegisterBlock, enable: bool) {
+    regs.imsc().modify(|_, w| w.txim().bit(enable));
+}
 
 fn read_dr(regs: &RegisterBlock) -> Result<u8, Error> {
     let dr = regs.dr().read();
@@ -561,14 +563,6 @@ fn read_dr(regs: &RegisterBlock) -> Result<u8, Error> {
 fn write_dr(regs: &RegisterBlock, byte: u8) {
     unsafe {
         regs.dr().write_with_zero(|w| w.data().bits(byte));
-    }
-}
-
-fn set_imsc_bits(regs: &RegisterBlock, mask: u32, enable: bool) {
-    let value = regs.imsc().read().bits();
-    let value = if enable { value | mask } else { value & !mask };
-    unsafe {
-        regs.imsc().write_with_zero(|w| w.bits(value));
     }
 }
 
@@ -935,15 +929,18 @@ impl<'d> UartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        // If dropped mid-byte the TX interrupt would stay armed with no
+        // waiter; disarm it. Steady-state RX stays armed by design.
+        let irq_guard = OnDrop::new(|| set_tx_interrupt(regs, false));
         for &byte in buffer {
             poll_fn(|cx| {
                 if !regs.fr().read().txff().bit_is_set() {
                     return Poll::Ready(());
                 }
                 info.state.tx_waker.register(cx.waker());
-                set_imsc_bits(regs, INT_TX, true);
+                set_tx_interrupt(regs, true);
                 if !regs.fr().read().txff().bit_is_set() {
-                    set_imsc_bits(regs, INT_TX, false);
+                    set_tx_interrupt(regs, false);
                     return Poll::Ready(());
                 }
                 Poll::Pending
@@ -951,29 +948,56 @@ impl<'d> UartTx<'d, Async> {
             .await;
             write_dr(regs, byte);
         }
-        set_imsc_bits(regs, INT_TX, false);
+        irq_guard.defuse();
+        set_tx_interrupt(regs, false);
         Ok(())
     }
 
     /// Wait until TX FIFO empty and UART not busy.
+    ///
+    /// The ASR6601 TX FIFO level interrupt is a one-shot per threshold
+    /// crossing: it does not re-assert while the FIFO keeps draining (unlike
+    /// the PL011), so the final `TXFE && !BUSY` state is never signaled by an
+    /// interrupt. Besides the interrupt, re-check the flags on a timer.
+    ///
+    /// The re-check interval must stay in the millisecond range: LPTIM0
+    /// compare values only a few ticks ahead of the running counter are
+    /// missed for the current 2 s cycle on this silicon, delaying the alarm
+    /// by up to one full period.
+    ///
+    /// Requires the `embassy-time` driver to be initialized (used for the re-check timer).
     pub async fn flush(&mut self) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
-        poll_fn(|cx| {
-            if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
-                return Poll::Ready(());
+        // Fast path: already drained, avoid arming the interrupt and timer.
+        if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
+            return Ok(());
+        }
+        // If dropped mid-flush the TX interrupt would stay armed with no
+        // waiter; disarm it.
+        let irq_guard = OnDrop::new(|| set_tx_interrupt(regs, false));
+        loop {
+            let event = poll_fn(|cx| {
+                if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
+                    return Poll::Ready(());
+                }
+                // TX interrupt fires when the FIFO drops to the threshold.
+                info.state.tx_waker.register(cx.waker());
+                set_tx_interrupt(regs, true);
+                if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
+                    set_tx_interrupt(regs, false);
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            });
+            let timer = embassy_time::Timer::after(embassy_time::Duration::from_millis(5));
+            match embassy_futures::select::select(event, timer).await {
+                embassy_futures::select::Either::First(()) => break,
+                embassy_futures::select::Either::Second(()) => continue,
             }
-            // TX interrupt fires when FIFO drops to the threshold; also useful while draining.
-            info.state.tx_waker.register(cx.waker());
-            set_imsc_bits(regs, INT_TX, true);
-            if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
-                set_imsc_bits(regs, INT_TX, false);
-                return Poll::Ready(());
-            }
-            Poll::Pending
-        })
-        .await;
-        set_imsc_bits(regs, INT_TX, false);
+        }
+        irq_guard.defuse();
+        set_tx_interrupt(regs, false);
         Ok(())
     }
 
@@ -986,6 +1010,9 @@ impl<'d> UartTx<'d, Async> {
         let dest = regs.dr().as_ptr();
         set_dma_req(regs, true, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, true, false));
         let result = unsafe {
             channel
                 .write(buffer, dest.cast::<u8>(), self.info.dma_tx, TransferOptions::default())
@@ -993,6 +1020,7 @@ impl<'d> UartTx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, true, false);
         result
     }
@@ -1108,6 +1136,9 @@ impl<'d> UartRx<'d, Async> {
         let src = regs.dr().as_ptr();
         set_dma_req(regs, false, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, false, false));
         let result = unsafe {
             channel
                 .read(src.cast::<u8>(), buffer, self.info.dma_rx, TransferOptions::default())
@@ -1115,6 +1146,7 @@ impl<'d> UartRx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, false, false);
         result
     }

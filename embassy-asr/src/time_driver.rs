@@ -186,6 +186,10 @@ impl LptimTimeDriver {
         wait_isr(ISR_CROK);
 
         self.period.store(0, Ordering::Release);
+        // No second init is expected (hal::init runs once), but leave no
+        // stale deadline behind if it ever re-runs: the queue itself belongs
+        // to embassy-time and cannot be drained safely from here.
+        critical_section::with(|cs| self.alarm.borrow(cs).set(u64::MAX));
         self.initialized.store(true, Ordering::Release);
 
         Interrupt::LPTIM0.unpend();
