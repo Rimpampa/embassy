@@ -27,6 +27,7 @@ use crate::interrupt::typelevel::{Binding, Handler, Interrupt as TypelevelInterr
 use crate::mode::{Async, Blocking, Mode};
 use crate::pac::ssp0::RegisterBlock;
 use crate::rcc::{self, Peripheral};
+use crate::time::Hertz;
 use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
 // PL022 / tremo_spi register layout is fully described by the PAC field
@@ -139,8 +140,8 @@ impl DataWidth {
 pub struct Config {
     /// SPI mode (clock polarity / phase).
     pub mode: SpiMode,
-    /// Desired SCLK frequency in hertz.
-    pub frequency: u32,
+    /// Desired SCLK frequency.
+    pub frequency: Hertz,
     /// Bit order. Only [`BitOrder::MsbFirst`] is accepted.
     pub bit_order: BitOrder,
     /// Frame data width.
@@ -156,7 +157,7 @@ impl Default for Config {
                 polarity: Polarity::IdleLow,
                 phase: Phase::CaptureOnFirstTransition,
             },
-            frequency: 1_000_000,
+            frequency: Hertz(1_000_000),
             bit_order: BitOrder::MsbFirst,
             data_width: DataWidth::Bits8,
             frame_format: FrameFormat::Motorola,
@@ -170,7 +171,7 @@ impl defmt::Format for Config {
         defmt::write!(
             f,
             "Config {{ frequency: {=u32}, bit_order: {}, data_width: {}, frame_format: {} }}",
-            self.frequency,
+            self.frequency.hz(),
             self.bit_order,
             self.data_width,
             self.frame_format,
@@ -257,7 +258,6 @@ pub struct Spi<'d, M: Mode> {
     _sck: Option<Flex<'d>>,
     _mosi: Option<Flex<'d>>,
     _miso: Option<Flex<'d>>,
-    _nss: Option<Flex<'d>>,
     tx_dma: Option<dma::Channel<'d, Async>>,
     rx_dma: Option<dma::Channel<'d, Async>>,
     data_width: DataWidth,
@@ -327,16 +327,25 @@ fn calc_dividers(pclk: u32, freq: u32) -> Result<(u8, u8), Error> {
 }
 
 impl<'d, M: Mode> Spi<'d, M> {
+    /// Arm the NVIC vector for interrupt-driven use.
+    ///
+    /// Called by the async constructors only; blocking instances never
+    /// enable the vector.
+    fn enable_interrupts(&self) {
+        self.info.interrupt.unpend();
+        unsafe {
+            self.info.interrupt.enable();
+        }
+    }
+
     fn new_inner<T: Instance>(
         _spi: Peri<'d, T>,
         sck: Option<Flex<'d>>,
         mosi: Option<Flex<'d>>,
         miso: Option<Flex<'d>>,
-        nss: Option<Flex<'d>>,
         tx_dma: Option<dma::Channel<'d, Async>>,
         rx_dma: Option<dma::Channel<'d, Async>>,
         config: Config,
-        enable_irq: bool,
     ) -> Result<Self, Error> {
         let info = T::info();
 
@@ -348,7 +357,6 @@ impl<'d, M: Mode> Spi<'d, M> {
             _sck: sck,
             _mosi: mosi,
             _miso: miso,
-            _nss: nss,
             tx_dma,
             rx_dma,
             data_width: config.data_width,
@@ -367,13 +375,6 @@ impl<'d, M: Mode> Spi<'d, M> {
             });
         }
 
-        if enable_irq {
-            info.interrupt.unpend();
-            unsafe {
-                info.interrupt.enable();
-            }
-        }
-
         spi.set_enabled(true);
         Ok(spi)
     }
@@ -388,7 +389,7 @@ impl<'d, M: Mode> Spi<'d, M> {
             PclkSel::Pclk0 => clocks.pclk0_hz,
             PclkSel::Pclk1 => clocks.pclk1_hz,
         };
-        let (cpsdvsr, scr) = calc_dividers(pclk, config.frequency)?;
+        let (cpsdvsr, scr) = calc_dividers(pclk, config.frequency.hz())?;
 
         let dss = match config.data_width {
             DataWidth::Bits4 => pac::ssp0::cr0::Dss::Value4,
@@ -448,6 +449,10 @@ impl<'d, M: Mode> Spi<'d, M> {
         unsafe { (*self.info.regs).sr().read().bits() }
     }
 
+    fn busy(&self) -> bool {
+        unsafe { (*self.info.regs).sr().read().bsy().bit_is_set() }
+    }
+
     fn take_error(&self) -> Result<(), Error> {
         match self.info.state.result.swap(RESULT_OK, Ordering::AcqRel) {
             RESULT_OVERRUN => Err(Error::Overrun),
@@ -487,13 +492,13 @@ impl<'d, M: Mode> Spi<'d, M> {
     }
 
     /// Change only the SCLK frequency.
-    pub fn set_frequency(&mut self, frequency: u32) -> Result<(), Error> {
+    pub fn set_frequency(&mut self, frequency: Hertz) -> Result<(), Error> {
         let clocks = rcc::clocks().ok_or(Error::ClocksNotInitialized)?;
         let pclk = match self.info.pclk {
             PclkSel::Pclk0 => clocks.pclk0_hz,
             PclkSel::Pclk1 => clocks.pclk1_hz,
         };
-        let (cpsdvsr, scr) = calc_dividers(pclk, frequency)?;
+        let (cpsdvsr, scr) = calc_dividers(pclk, frequency.hz())?;
         self.set_enabled(false);
         unsafe {
             let regs = &*self.info.regs;
@@ -506,7 +511,7 @@ impl<'d, M: Mode> Spi<'d, M> {
 
     /// Block until the SSP is idle.
     pub fn blocking_flush(&mut self) -> Result<(), Error> {
-        while self.sr() & SR_BSY != 0 {}
+        while self.busy() {}
         self.take_error()
     }
 
@@ -618,9 +623,7 @@ impl<'d> Spi<'d, Blocking> {
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
             None,
             None,
-            None,
             config,
-            false,
         )
     }
 
@@ -643,9 +646,7 @@ impl<'d> Spi<'d, Blocking> {
             Some(configure_input_af(miso, miso_af, Pull::None)),
             None,
             None,
-            None,
             config,
-            false,
         )
     }
 
@@ -664,9 +665,7 @@ impl<'d> Spi<'d, Blocking> {
             None,
             None,
             None,
-            None,
             config,
-            false,
         )
     }
 
@@ -685,32 +684,7 @@ impl<'d> Spi<'d, Blocking> {
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
             None,
             None,
-            None,
             config,
-            false,
-        )
-    }
-
-    /// Blocking master that also muxes the hardware NSS/FSS pin.
-    pub fn new_blocking_with_nss<T: Instance, Sck: SckPin<T>, Mosi: MosiPin<T>, Miso: MisoPin<T>, Nss: NssPin<T>>(
-        spi: Peri<'d, T>,
-        sck: Peri<'d, Sck>,
-        mosi: Peri<'d, Mosi>,
-        miso: Peri<'d, Miso>,
-        nss: Peri<'d, Nss>,
-        config: Config,
-    ) -> Result<Self, Error> {
-        let pull = sck_pull(config.mode);
-        Self::new_inner::<T>(
-            spi,
-            Some(configure_output_af(sck, Sck::AF, pull)),
-            Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
-            Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            Some(configure_output_af(nss, Nss::AF, Pull::Up)),
-            None,
-            None,
-            config,
-            false,
         )
     }
 }
@@ -726,17 +700,17 @@ impl<'d> Spi<'d, Async> {
         config: Config,
     ) -> Result<Self, Error> {
         let pull = sck_pull(config.mode);
-        Self::new_inner::<T>(
+        let this = Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, Sck::AF, pull)),
             Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
             None,
             None,
-            None,
             config,
-            true,
-        )
+        )?;
+        this.enable_interrupts();
+        Ok(this)
     }
 
     /// Create an async master with explicit alternate-function numbers.
@@ -752,17 +726,61 @@ impl<'d> Spi<'d, Async> {
         config: Config,
     ) -> Result<Self, Error> {
         let pull = sck_pull(config.mode);
-        Self::new_inner::<T>(
+        let this = Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, sck_af, pull)),
             Some(configure_output_af(mosi, mosi_af, Pull::None)),
             Some(configure_input_af(miso, miso_af, Pull::None)),
             None,
             None,
+            config,
+        )?;
+        this.enable_interrupts();
+        Ok(this)
+    }
+
+    /// Create an async transmit-only master (MOSI + SCK only).
+    pub fn new_txonly<T: Instance, Sck: SckPin<T>, Mosi: MosiPin<T>>(
+        spi: Peri<'d, T>,
+        sck: Peri<'d, Sck>,
+        mosi: Peri<'d, Mosi>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        config: Config,
+    ) -> Result<Self, Error> {
+        let pull = sck_pull(config.mode);
+        let this = Self::new_inner::<T>(
+            spi,
+            Some(configure_output_af(sck, Sck::AF, pull)),
+            Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
+            None,
+            None,
             None,
             config,
-            true,
-        )
+        )?;
+        this.enable_interrupts();
+        Ok(this)
+    }
+
+    /// Create an async receive-only master (MISO + SCK only).
+    pub fn new_rxonly<T: Instance, Sck: SckPin<T>, Miso: MisoPin<T>>(
+        spi: Peri<'d, T>,
+        sck: Peri<'d, Sck>,
+        miso: Peri<'d, Miso>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        config: Config,
+    ) -> Result<Self, Error> {
+        let pull = sck_pull(config.mode);
+        let this = Self::new_inner::<T>(
+            spi,
+            Some(configure_output_af(sck, Sck::AF, pull)),
+            None,
+            Some(configure_input_af(miso, Miso::AF, Pull::None)),
+            None,
+            None,
+            config,
+        )?;
+        this.enable_interrupts();
+        Ok(this)
     }
 
     /// Create an async master that uses DMA for transfers.
@@ -793,17 +811,17 @@ impl<'d> Spi<'d, Async> {
         let pull = sck_pull(config.mode);
         let tx = dma::Channel::new(tx_dma, irq);
         let rx = dma::Channel::new(rx_dma, irq);
-        Self::new_inner::<T>(
+        let this = Self::new_inner::<T>(
             spi,
             Some(configure_output_af(sck, Sck::AF, pull)),
             Some(configure_output_af(mosi, Mosi::AF, Pull::None)),
             Some(configure_input_af(miso, Miso::AF, Pull::None)),
-            None,
             Some(tx),
             Some(rx),
             config,
-            true,
-        )
+        )?;
+        this.enable_interrupts();
+        Ok(this)
     }
 
     async fn wait_sr(&mut self, mask: u32) -> Result<(), Error> {
@@ -903,9 +921,9 @@ impl<'d> Spi<'d, Async> {
     }
 
     async fn flush_async(&mut self) -> Result<(), Error> {
-        while self.sr() & SR_BSY != 0 {
+        while self.busy() {
             self.wait_sr(SR_TFE).await?;
-            if self.sr() & SR_BSY == 0 {
+            if !self.busy() {
                 break;
             }
         }
@@ -921,7 +939,7 @@ impl<'d> Spi<'d, Async> {
             .await
             .map_err(Error::Dma)?;
 
-        while self.sr() & SR_BSY != 0 {}
+        while self.busy() {}
         self.drain_rx();
         self.take_error()
     }
@@ -1058,12 +1076,6 @@ pub trait MisoPin<T: Instance>: GpioPin {
     const AF: AlternateFunction;
 }
 
-/// NSS / SSP_FSS pin for an SSP instance.
-pub trait NssPin<T: Instance>: GpioPin {
-    /// Datasheet alternate-function number for this pin/signal.
-    const AF: AlternateFunction;
-}
-
 macro_rules! impl_pin {
     ($pin:ident, $instance:ident, $trait:ident, $af:ident) => {
         impl $trait<peripherals::$instance> for peripherals::$pin {
@@ -1074,29 +1086,23 @@ macro_rules! impl_pin {
 
 // Table 4-4: every documented SSP remap uses Fun=4.
 impl_pin!(PA0, SSP0, SckPin, Function4);
-impl_pin!(PA1, SSP0, NssPin, Function4);
 impl_pin!(PA2, SSP0, MosiPin, Function4);
 impl_pin!(PA3, SSP0, MisoPin, Function4);
 impl_pin!(PB7, SSP0, MisoPin, Function4);
 impl_pin!(PC12, SSP0, SckPin, Function4);
-impl_pin!(PC13, SSP0, NssPin, Function4);
 impl_pin!(PC15, SSP0, MisoPin, Function4);
 
 impl_pin!(PA4, SSP1, SckPin, Function4);
-impl_pin!(PA5, SSP1, NssPin, Function4);
 impl_pin!(PA6, SSP1, MosiPin, Function4);
 impl_pin!(PA7, SSP1, MisoPin, Function4);
 impl_pin!(PB8, SSP1, SckPin, Function4);
-impl_pin!(PB9, SSP1, NssPin, Function4);
 impl_pin!(PB10, SSP1, MosiPin, Function4);
 impl_pin!(PB11, SSP1, MisoPin, Function4);
 
 impl_pin!(PA8, SSP2, SckPin, Function4);
-impl_pin!(PA9, SSP2, NssPin, Function4);
 impl_pin!(PA10, SSP2, MosiPin, Function4);
 impl_pin!(PA11, SSP2, MisoPin, Function4);
 impl_pin!(PB12, SSP2, SckPin, Function4);
-impl_pin!(PB13, SSP2, NssPin, Function4);
 impl_pin!(PB14, SSP2, MosiPin, Function4);
 impl_pin!(PB15, SSP2, MisoPin, Function4);
 
