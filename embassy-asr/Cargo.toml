@@ -26,6 +26,7 @@ embassy-time-driver = { version = "0.2.2", path = "../embassy-time-driver", opti
 embassy-time-queue-utils = { version = "0.3.2", path = "../embassy-time-queue-utils", optional = true }
 
 embedded-hal = "1.0"
+embedded-hal-02 = { package = "embedded-hal", version = "0.2.6", features = ["unproven"] }
 embedded-hal-async = "1.0"
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
