@@ -22,18 +22,13 @@ const ANALOG_XO24M_POWER_DOWN: u32 = 1 << 4;
 const ANALOG_RCO48M_POWER_DOWN: u32 = 1 << 5;
 const ANALOG_RCO4M_POWER_DOWN: u32 = 1 << 6;
 
-const CR0_PCLK0_DIV_MASK: u32 = 0x0000_00e0;
-const CR0_HCLK_DIV_MASK: u32 = 0x0000_0f00;
-const CR0_SYSCLK_SEL_MASK: u32 = 0x0000_7000;
-const CR0_PCLK1_DIV_MASK: u32 = 0x0003_8000;
-
 const RCC_SR_ALL_DONE: u32 = 0x3f;
 
-const LORAC_CR1_TCXO_ENABLE: u32 = 0x03;
-const LORAC_CR1_XO32M_ENABLE: u32 = 1 << 2;
-const LORAC_CR1_NRESET: u32 = 1 << 5;
-const LORAC_CR1_POWER_ON_RESET: u32 = 1 << 7;
-const LORAC_SR_XO32M_READY: u32 = 1 << 1;
+// NOTE: the `*_bat` LORAC accessors below address the same bits the vendor
+// SDK names XO32M_ENABLE (bit 2), NRESET (5), POR (7), TCXO (0+1) and the
+// READY status (SR bit 1) — positions verified against the PAC accessors:
+// `clk_32m_en_bat`, `nreset_bat`, `por_bat`, `pwrtcxo_en_bat` +
+// `tcxo_en_bat`, `clk_32m_rdy_bat_sr`.
 
 const ASYNC_RESET_DELAY_US: u64 = 92;
 
@@ -328,40 +323,82 @@ fn update_bits(value: u32, mask: u32, set: bool) -> u32 {
     if set { value | mask } else { value & !mask }
 }
 
-fn modify_cr0(mask: u32, value: u32) {
-    critical_section::with(|_| {
-        rcc()
-            .cr0()
-            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (value & mask)) });
-    });
-}
-
 fn current_system_frequency() -> Option<u32> {
-    match (rcc().cr0().read().bits() & CR0_SYSCLK_SEL_MASK) >> 12 {
-        0 => Some(RCO48M_HZ / 2),
-        1 | 2 => Some(LOW_SPEED_HZ),
-        3 => None,
-        4 => Some(XO24M_HZ),
-        5 => Some(XO32M_HZ),
-        6 => Some(RCO4M_HZ),
-        7 => Some(RCO48M_HZ),
-        _ => unreachable!(),
+    use pac::rcc::cr0::SysclkSel;
+    // The hardware field is fully specified, so every bit pattern decodes;
+    // only PLL has no vendor frequency to report.
+    match rcc().cr0().read().sysclk_sel().variant() {
+        SysclkSel::Rco48mDiv2 => Some(RCO48M_HZ / 2),
+        SysclkSel::Rco32k | SysclkSel::Xo32k => Some(LOW_SPEED_HZ),
+        SysclkSel::Pll => None,
+        SysclkSel::Xo24m => Some(XO24M_HZ),
+        SysclkSel::Xo32m => Some(XO32M_HZ),
+        SysclkSel::Rco4m => Some(RCO4M_HZ),
+        SysclkSel::Rco48m => Some(RCO48M_HZ),
     }
 }
 
 fn set_hclk_divider(divider: HclkDivider) {
-    modify_cr0(CR0_HCLK_DIV_MASK, (divider as u32) << 8);
+    use pac::rcc::cr0::HclkDiv;
+    let variant = match divider {
+        HclkDivider::Div1 => HclkDiv::Value1,
+        HclkDivider::Div2 => HclkDiv::Value2,
+        HclkDivider::Div4 => HclkDiv::Value4,
+        HclkDivider::Div8 => HclkDiv::Value8,
+        HclkDivider::Div16 => HclkDiv::Value16,
+        HclkDivider::Div32 => HclkDiv::Value32,
+        HclkDivider::Div64 => HclkDiv::Value64,
+        HclkDivider::Div128 => HclkDiv::Value128,
+        HclkDivider::Div256 => HclkDiv::Value256,
+        HclkDivider::Div512 => HclkDiv::Value512,
+    };
+    critical_section::with(|_| {
+        rcc().cr0().modify(|_, w| w.hclk_div().variant(variant));
+    });
 }
 
 fn set_pclk_dividers(pclk0: PclkDivider, pclk1: PclkDivider) {
-    modify_cr0(
-        CR0_PCLK0_DIV_MASK | CR0_PCLK1_DIV_MASK,
-        ((pclk0 as u32) << 5) | ((pclk1 as u32) << 15),
-    );
+    use pac::rcc::cr0::{Pclk0Div, Pclk1Div};
+    fn map0(div: PclkDivider) -> Pclk0Div {
+        match div {
+            PclkDivider::Div1 => Pclk0Div::Value1,
+            PclkDivider::Div2 => Pclk0Div::Value2,
+            PclkDivider::Div4 => Pclk0Div::Value4,
+            PclkDivider::Div8 => Pclk0Div::Value8,
+            PclkDivider::Div16 => Pclk0Div::Value16,
+        }
+    }
+    fn map1(div: PclkDivider) -> Pclk1Div {
+        match div {
+            PclkDivider::Div1 => Pclk1Div::Value1,
+            PclkDivider::Div2 => Pclk1Div::Value2,
+            PclkDivider::Div4 => Pclk1Div::Value4,
+            PclkDivider::Div8 => Pclk1Div::Value8,
+            PclkDivider::Div16 => Pclk1Div::Value16,
+        }
+    }
+    critical_section::with(|_| {
+        rcc().cr0().modify(|_, w| {
+            w.pclk0_div().variant(map0(pclk0));
+            w.pclk1_div().variant(map1(pclk1))
+        });
+    });
 }
 
 fn set_system_clock(source: SystemClockSource) {
-    modify_cr0(CR0_SYSCLK_SEL_MASK, (source as u32) << 12);
+    use pac::rcc::cr0::SysclkSel;
+    let variant = match source {
+        SystemClockSource::Rco48mDiv2 => SysclkSel::Rco48mDiv2,
+        SystemClockSource::Rco32k => SysclkSel::Rco32k,
+        SystemClockSource::Xo32k => SysclkSel::Xo32k,
+        SystemClockSource::Xo24m => SysclkSel::Xo24m,
+        SystemClockSource::Xo32m => SysclkSel::Xo32m,
+        SystemClockSource::Rco4m => SysclkSel::Rco4m,
+        SystemClockSource::Rco48m => SysclkSel::Rco48m,
+    };
+    critical_section::with(|_| {
+        rcc().cr0().modify(|_, w| w.sysclk_sel().variant(variant));
+    });
 }
 
 fn configure_clock_tree(config: Config) {
@@ -434,22 +471,22 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
             set_peripheral_clock_raw(Peripheral::Lora, true, poll_limit)?;
 
             critical_section::with(|_| {
-                lorac().cr1().modify(|r, w| {
-                    let mut value = r.bits();
-                    if value & LORAC_CR1_NRESET == 0 {
-                        value |= LORAC_CR1_NRESET;
-                        value &= !LORAC_CR1_POWER_ON_RESET;
+                let nreset_clear = !lorac().cr1().read().nreset_bat().bit_is_set();
+                lorac().cr1().modify(|_, w| {
+                    if nreset_clear {
+                        w.nreset_bat().set_bit();
+                        w.por_bat().clear_bit();
                     }
                     if xo32m_uses_tcxo {
-                        value |= LORAC_CR1_TCXO_ENABLE;
+                        w.pwrtcxo_en_bat().set_bit();
+                        w.tcxo_en_bat().set_bit();
                     }
-                    value |= LORAC_CR1_XO32M_ENABLE;
-                    unsafe { w.bits(value) }
+                    w.clk_32m_en_bat().set_bit()
                 });
             });
 
             wait_until(poll_limit, WaitTarget::Xo32m, || {
-                lorac().sr().read().bits() & LORAC_SR_XO32M_READY != 0
+                lorac().sr().read().clk_32m_rdy_bat_sr().bit_is_set()
             })
         }
         Oscillator::Rco4m => {
@@ -532,51 +569,56 @@ fn modify_clock_register(register: ClockRegister, mask: u32, enable: bool) {
     });
 }
 
-fn basic_clock(peripheral: Peripheral) -> Option<(ClockRegister, u32)> {
-    let value = match peripheral {
-        Peripheral::Timer3 => (ClockRegister::Cgr0, 1 << 0),
-        Peripheral::Timer2 => (ClockRegister::Cgr0, 1 << 1),
-        Peripheral::Timer1 => (ClockRegister::Cgr0, 1 << 2),
-        Peripheral::Timer0 => (ClockRegister::Cgr0, 1 << 3),
-        Peripheral::Lora => (ClockRegister::Cgr0, 1 << 4),
-        Peripheral::Dac => (ClockRegister::Cgr0, 1 << 5),
-        Peripheral::Afec => (ClockRegister::Cgr0, 1 << 7),
-        Peripheral::Adc => (ClockRegister::Cgr0, 1 << 8),
-        Peripheral::I2c2 => (ClockRegister::Cgr0, 1 << 10),
-        Peripheral::I2c1 => (ClockRegister::Cgr0, 1 << 11),
-        Peripheral::I2c0 => (ClockRegister::Cgr0, 1 << 12),
-        Peripheral::Ssp2 => (ClockRegister::Cgr0, 1 << 13),
-        Peripheral::Ssp1 => (ClockRegister::Cgr0, 1 << 14),
-        Peripheral::Ssp0 => (ClockRegister::Cgr0, 1 << 15),
-        Peripheral::Uart3 => (ClockRegister::Cgr0, 1 << 17),
-        Peripheral::Uart2 => (ClockRegister::Cgr0, 1 << 18),
-        Peripheral::Uart1 => (ClockRegister::Cgr0, 1 << 19),
-        Peripheral::Uart0 => (ClockRegister::Cgr0, 1 << 20),
-        Peripheral::Syscfg => (ClockRegister::Cgr0, 1 << 21),
-        Peripheral::GpioD => (ClockRegister::Cgr0, 1 << 22),
-        Peripheral::GpioC => (ClockRegister::Cgr0, 1 << 23),
-        Peripheral::GpioB => (ClockRegister::Cgr0, 1 << 24),
-        Peripheral::GpioA => (ClockRegister::Cgr0, 1 << 25),
-        Peripheral::Bstimer1 => (ClockRegister::Cgr0, 1 << 26),
-        Peripheral::Bstimer0 => (ClockRegister::Cgr0, 1 << 27),
-        Peripheral::Crc => (ClockRegister::Cgr0, 1 << 28),
-        Peripheral::Dma1 => (ClockRegister::Cgr0, 1 << 29),
-        Peripheral::Dma0 => (ClockRegister::Cgr0, 1 << 30),
-        Peripheral::Pwr => (ClockRegister::Cgr0, 1 << 31),
-        Peripheral::Sec => (ClockRegister::Cgr1, 1 << 0),
-        Peripheral::Qspi => (ClockRegister::Cgr1, 1 << 5),
-        Peripheral::Sac => (ClockRegister::Cgr1, 1 << 7),
-        Peripheral::I2s => (ClockRegister::Cgr1, 1 << 8),
-        Peripheral::Rng => (ClockRegister::Cgr1, 1 << 10),
-        Peripheral::Wdg => (ClockRegister::Cgr1, (1 << 2) | (1 << 6)),
-        Peripheral::Rtc
-        | Peripheral::Iwdg
-        | Peripheral::Lptimer0
-        | Peripheral::Lptimer1
-        | Peripheral::Lcd
-        | Peripheral::Lpuart => return None,
-    };
-    Some(value)
+fn set_basic_clock_gate(peripheral: Peripheral, enable: bool) {
+    critical_section::with(|_| {
+        let rcc = rcc();
+        match peripheral {
+            Peripheral::Timer3 => rcc.cgr0().modify(|_, w| w.gptim3_clk_en().bit(enable)),
+            Peripheral::Timer2 => rcc.cgr0().modify(|_, w| w.gptim2_clk_en().bit(enable)),
+            Peripheral::Timer1 => rcc.cgr0().modify(|_, w| w.gptim1_clk_en().bit(enable)),
+            Peripheral::Timer0 => rcc.cgr0().modify(|_, w| w.gptim0_clk_en().bit(enable)),
+            Peripheral::Lora => rcc.cgr0().modify(|_, w| w.lorac_clk_en().bit(enable)),
+            Peripheral::Dac => rcc.cgr0().modify(|_, w| w.dacctrl_clk_en().bit(enable)),
+            Peripheral::Afec => rcc.cgr0().modify(|_, w| w.afec_clk_en().bit(enable)),
+            Peripheral::Adc => rcc.cgr0().modify(|_, w| w.adc_clk_en().bit(enable)),
+            Peripheral::I2c2 => rcc.cgr0().modify(|_, w| w.i2c2_clk_en().bit(enable)),
+            Peripheral::I2c1 => rcc.cgr0().modify(|_, w| w.i2c1_clk_en().bit(enable)),
+            Peripheral::I2c0 => rcc.cgr0().modify(|_, w| w.i2c0_clk_en().bit(enable)),
+            Peripheral::Ssp2 => rcc.cgr0().modify(|_, w| w.ssp2_clk_en().bit(enable)),
+            Peripheral::Ssp1 => rcc.cgr0().modify(|_, w| w.ssp1_clk_en().bit(enable)),
+            Peripheral::Ssp0 => rcc.cgr0().modify(|_, w| w.ssp0_clk_en().bit(enable)),
+            Peripheral::Uart3 => rcc.cgr0().modify(|_, w| w.uart3_clk_en().bit(enable)),
+            Peripheral::Uart2 => rcc.cgr0().modify(|_, w| w.uart2_clk_en().bit(enable)),
+            Peripheral::Uart1 => rcc.cgr0().modify(|_, w| w.uart1_clk_en().bit(enable)),
+            Peripheral::Uart0 => rcc.cgr0().modify(|_, w| w.uart0_clk_en().bit(enable)),
+            Peripheral::Syscfg => rcc.cgr0().modify(|_, w| w.syscfg_clk_en().bit(enable)),
+            Peripheral::GpioA => rcc.cgr0().modify(|_, w| w.iom0_clk_en().bit(enable)),
+            Peripheral::GpioB => rcc.cgr0().modify(|_, w| w.iom1_clk_en().bit(enable)),
+            Peripheral::GpioC => rcc.cgr0().modify(|_, w| w.iom2_clk_en().bit(enable)),
+            Peripheral::GpioD => rcc.cgr0().modify(|_, w| w.iom3_clk_en().bit(enable)),
+            Peripheral::Bstimer1 => rcc.cgr0().modify(|_, w| w.basictim1_clk_en().bit(enable)),
+            Peripheral::Bstimer0 => rcc.cgr0().modify(|_, w| w.basictim0_clk_en().bit(enable)),
+            Peripheral::Crc => rcc.cgr0().modify(|_, w| w.crc_clk_en().bit(enable)),
+            Peripheral::Dma1 => rcc.cgr0().modify(|_, w| w.dmac1_clk_en().bit(enable)),
+            Peripheral::Dma0 => rcc.cgr0().modify(|_, w| w.dmac0_clk_en().bit(enable)),
+            Peripheral::Pwr => rcc.cgr0().modify(|_, w| w.pwr_clk_en().bit(enable)),
+            Peripheral::Sec => rcc.cgr1().modify(|_, w| w.sec_clk_en().bit(enable)),
+            Peripheral::Qspi => rcc.cgr1().modify(|_, w| w.qspi_clk_en().bit(enable)),
+            Peripheral::Sac => rcc.cgr1().modify(|_, w| w.sac_clk_en().bit(enable)),
+            Peripheral::I2s => rcc.cgr1().modify(|_, w| w.i2s_clk_en().bit(enable)),
+            Peripheral::Rng => rcc.cgr1().modify(|_, w| w.rngc_clk_en().bit(enable)),
+            Peripheral::Wdg => rcc.cgr1().modify(|_, w| {
+                w.wwdg_clk_en().bit(enable);
+                w.wwdg_cnt_clk_en().bit(enable)
+            }),
+            Peripheral::Rtc
+            | Peripheral::Iwdg
+            | Peripheral::Lptimer0
+            | Peripheral::Lptimer1
+            | Peripheral::Lcd
+            | Peripheral::Lpuart => unreachable!("dual-domain clocks use set_peripheral_clock_raw"),
+        }
+    });
 }
 
 fn wait_rcc_status(mask: u32, poll_limit: u32) -> Result<(), Error> {
@@ -634,8 +676,7 @@ fn set_peripheral_clock_raw(peripheral: Peripheral, enable: bool, poll_limit: u3
         Peripheral::Lptimer0 => set_lptimer_clock(1 << 4, 1 << 9, 1 << 4, enable, poll_limit),
         Peripheral::Lptimer1 => set_lptimer_clock(1 << 11, 1 << 12, 1 << 5, enable, poll_limit),
         _ => {
-            let (register, mask) = basic_clock(peripheral).unwrap();
-            modify_clock_register(register, mask, enable);
+            set_basic_clock_gate(peripheral, enable);
             Ok(())
         }
     }
@@ -651,57 +692,6 @@ pub(crate) fn disable_peripheral(peripheral: Peripheral) -> Result<(), Error> {
     set_peripheral_clock_raw(peripheral, false, Config::new().readiness_poll_limit)
 }
 
-#[derive(Clone, Copy)]
-enum ResetRegister {
-    Rst0,
-    Rst1,
-}
-
-fn reset_bit(peripheral: Peripheral) -> Result<(ResetRegister, u32), Error> {
-    let bit = match peripheral {
-        Peripheral::Sac => (ResetRegister::Rst0, 0),
-        Peripheral::Sec => (ResetRegister::Rst0, 1),
-        Peripheral::Crc => (ResetRegister::Rst0, 2),
-        Peripheral::Rtc => (ResetRegister::Rst0, 3),
-        Peripheral::Wdg => (ResetRegister::Rst0, 4),
-        Peripheral::Iwdg => (ResetRegister::Rst0, 5),
-        Peripheral::Lptimer0 => (ResetRegister::Rst0, 6),
-        Peripheral::Bstimer1 => (ResetRegister::Rst0, 7),
-        Peripheral::Bstimer0 => (ResetRegister::Rst0, 8),
-        Peripheral::Timer3 => (ResetRegister::Rst0, 9),
-        Peripheral::Timer2 => (ResetRegister::Rst0, 10),
-        Peripheral::Timer1 => (ResetRegister::Rst0, 11),
-        Peripheral::Timer0 => (ResetRegister::Rst0, 12),
-        Peripheral::GpioA | Peripheral::GpioB | Peripheral::GpioC | Peripheral::GpioD => (ResetRegister::Rst0, 13),
-        Peripheral::Lora => (ResetRegister::Rst0, 14),
-        Peripheral::Dac => (ResetRegister::Rst0, 15),
-        Peripheral::Lcd => (ResetRegister::Rst0, 16),
-        Peripheral::Afec => (ResetRegister::Rst0, 17),
-        Peripheral::Adc => (ResetRegister::Rst0, 18),
-        Peripheral::I2c2 => (ResetRegister::Rst0, 20),
-        Peripheral::I2c1 => (ResetRegister::Rst0, 21),
-        Peripheral::I2c0 => (ResetRegister::Rst0, 22),
-        Peripheral::Qspi => (ResetRegister::Rst0, 23),
-        Peripheral::Ssp2 => (ResetRegister::Rst0, 24),
-        Peripheral::Ssp1 => (ResetRegister::Rst0, 25),
-        Peripheral::Ssp0 => (ResetRegister::Rst0, 26),
-        Peripheral::Lpuart => (ResetRegister::Rst0, 27),
-        Peripheral::Uart3 => (ResetRegister::Rst0, 28),
-        Peripheral::Uart2 => (ResetRegister::Rst0, 29),
-        Peripheral::Uart1 => (ResetRegister::Rst0, 30),
-        Peripheral::Uart0 => (ResetRegister::Rst0, 31),
-        Peripheral::Dma1 => (ResetRegister::Rst1, 0),
-        Peripheral::Dma0 => (ResetRegister::Rst1, 1),
-        Peripheral::I2s => (ResetRegister::Rst1, 2),
-        Peripheral::Rng => (ResetRegister::Rst1, 3),
-        Peripheral::Lptimer1 => (ResetRegister::Rst1, 4),
-        Peripheral::Syscfg | Peripheral::Pwr => {
-            return Err(Error::ResetUnsupported(peripheral));
-        }
-    };
-    Ok((bit.0, 1 << bit.1))
-}
-
 fn reset_needs_release_delay(peripheral: Peripheral) -> bool {
     matches!(
         peripheral,
@@ -715,16 +705,55 @@ fn reset_needs_release_delay(peripheral: Peripheral) -> bool {
 }
 
 fn set_reset_line(peripheral: Peripheral, asserted: bool) -> Result<(), Error> {
-    let (register, mask) = reset_bit(peripheral)?;
+    // Active-low: asserting clears the bit.
+    if matches!(peripheral, Peripheral::Syscfg | Peripheral::Pwr) {
+        return Err(Error::ResetUnsupported(peripheral));
+    }
+    let release = !asserted;
     critical_section::with(|_| {
         let rcc = rcc();
-        match register {
-            ResetRegister::Rst0 => rcc
-                .rst0()
-                .modify(|r, w| unsafe { w.bits(update_bits(r.bits(), mask, !asserted)) }),
-            ResetRegister::Rst1 => rcc
-                .rst1()
-                .modify(|r, w| unsafe { w.bits(update_bits(r.bits(), mask, !asserted)) }),
+        match peripheral {
+            Peripheral::Sac => rcc.rst0().modify(|_, w| w.sac_rst_n().bit(release)),
+            Peripheral::Sec => rcc.rst0().modify(|_, w| w.sec_rst_n().bit(release)),
+            Peripheral::Crc => rcc.rst0().modify(|_, w| w.crc_rst_n().bit(release)),
+            Peripheral::Rtc => rcc.rst0().modify(|_, w| w.rtc_rst_n().bit(release)),
+            Peripheral::Wdg => rcc.rst0().modify(|_, w| w.wwdg_rst_n().bit(release)),
+            Peripheral::Iwdg => rcc.rst0().modify(|_, w| w.iwdg_rst_n().bit(release)),
+            Peripheral::Lptimer0 => rcc.rst0().modify(|_, w| w.lptim0_rst_n().bit(release)),
+            Peripheral::Bstimer1 => rcc.rst0().modify(|_, w| w.basictim1_rst_n().bit(release)),
+            Peripheral::Bstimer0 => rcc.rst0().modify(|_, w| w.basictim0_rst_n().bit(release)),
+            Peripheral::Timer3 => rcc.rst0().modify(|_, w| w.gptim3_rst_n().bit(release)),
+            Peripheral::Timer2 => rcc.rst0().modify(|_, w| w.gptim2_rst_n().bit(release)),
+            Peripheral::Timer1 => rcc.rst0().modify(|_, w| w.gptim1_rst_n().bit(release)),
+            Peripheral::Timer0 => rcc.rst0().modify(|_, w| w.gptim0_rst_n().bit(release)),
+            // One shared IOM reset covers all four GPIO ports.
+            Peripheral::GpioA | Peripheral::GpioB | Peripheral::GpioC | Peripheral::GpioD => {
+                rcc.rst0().modify(|_, w| w.iom_rst_n().bit(release))
+            }
+            Peripheral::Lora => rcc.rst0().modify(|_, w| w.lorac_rst_n().bit(release)),
+            Peripheral::Dac => rcc.rst0().modify(|_, w| w.dacctrl_rst_n().bit(release)),
+            Peripheral::Lcd => rcc.rst0().modify(|_, w| w.lcd_rst_n().bit(release)),
+            Peripheral::Afec => rcc.rst0().modify(|_, w| w.afec_rst_n().bit(release)),
+            Peripheral::Adc => rcc.rst0().modify(|_, w| w.adc_rst_n().bit(release)),
+            Peripheral::I2c2 => rcc.rst0().modify(|_, w| w.i2c2_rst_n().bit(release)),
+            Peripheral::I2c1 => rcc.rst0().modify(|_, w| w.i2c1_rst_n().bit(release)),
+            Peripheral::I2c0 => rcc.rst0().modify(|_, w| w.i2c0_rst_n().bit(release)),
+            Peripheral::Qspi => rcc.rst0().modify(|_, w| w.qspi_rst_n().bit(release)),
+            Peripheral::Ssp2 => rcc.rst0().modify(|_, w| w.ssp2_rst_n().bit(release)),
+            Peripheral::Ssp1 => rcc.rst0().modify(|_, w| w.ssp1_rst_n().bit(release)),
+            Peripheral::Ssp0 => rcc.rst0().modify(|_, w| w.ssp0_rst_n().bit(release)),
+            Peripheral::Lpuart => rcc.rst0().modify(|_, w| w.lpuart_rst_n().bit(release)),
+            Peripheral::Uart3 => rcc.rst0().modify(|_, w| w.uart3_rst_n().bit(release)),
+            Peripheral::Uart2 => rcc.rst0().modify(|_, w| w.uart2_rst_n().bit(release)),
+            Peripheral::Uart1 => rcc.rst0().modify(|_, w| w.uart1_rst_n().bit(release)),
+            Peripheral::Uart0 => rcc.rst0().modify(|_, w| w.uart0_rst_n().bit(release)),
+            Peripheral::Dma1 => rcc.rst1().modify(|_, w| w.dmac1_rst_n().bit(release)),
+            Peripheral::Dma0 => rcc.rst1().modify(|_, w| w.dmac0_rst_n().bit(release)),
+            Peripheral::I2s => rcc.rst1().modify(|_, w| w.i2s_rst_n().bit(release)),
+            Peripheral::Rng => rcc.rst1().modify(|_, w| w.rngc_rst_n().bit(release)),
+            Peripheral::Lptimer1 => rcc.rst1().modify(|_, w| w.lptim1_rst_n().bit(release)),
+            // Syscfg/Pwr rejected above: the vendor provides no reset bits.
+            _ => unreachable!(),
         };
     });
     Ok(())

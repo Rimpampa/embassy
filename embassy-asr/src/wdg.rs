@@ -6,9 +6,6 @@ use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
 
 const LOCK_TOKEN: u32 = 0x1acc_e551;
-const CONTROL_RESEN: u32 = 1 << 1;
-const CONTROL_INTEN: u32 = 1 << 0;
-const RCC_RST_CR_WDG_RESET_REQ_EN: u32 = 1 << 4;
 
 /// Owned system watchdog.
 pub struct Watchdog<'d> {
@@ -29,17 +26,18 @@ impl<'d> Watchdog<'d> {
     pub fn start(&self, reload_value: u32) {
         unlock();
         let regs = Self::regs();
-        unsafe {
-            regs.load().write_with_zero(|w| w.bits(reload_value));
-            regs.control()
-                .write_with_zero(|w| w.bits(CONTROL_RESEN | CONTROL_INTEN));
-        }
+        unsafe { regs.load().write_with_zero(|w| w.load().bits(reload_value)) };
+        regs.control().modify(|_, w| {
+            w.resen().set_bit();
+            w.inten().set_bit();
+            w
+        });
         lock();
 
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.rst_cr()
-                .modify(|r, w| unsafe { w.bits(r.bits() | RCC_RST_CR_WDG_RESET_REQ_EN) });
+                .modify(|_, w| w.wwdg_reset_req_en().set_bit());
         });
     }
 
@@ -57,21 +55,23 @@ impl<'d> Watchdog<'d> {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.rst_cr()
-                .modify(|r, w| unsafe { w.bits(r.bits() & !RCC_RST_CR_WDG_RESET_REQ_EN) });
+                .modify(|_, w| w.wwdg_reset_req_en().clear_bit());
         });
 
         unlock();
         let regs = Self::regs();
-        unsafe {
-            regs.control().write_with_zero(|w| w.bits(0));
-            regs.load().write_with_zero(|w| w.bits(0xffff_ffff));
-        }
+        regs.control().modify(|_, w| {
+            w.resen().clear_bit();
+            w.inten().clear_bit();
+            w
+        });
+        unsafe { regs.load().write_with_zero(|w| w.load().bits(0xffff_ffff)) };
         lock();
     }
 
     /// Current down-counter value.
     pub fn value(&self) -> u32 {
-        Self::regs().value().read().bits()
+        Self::regs().value().read().value().bits()
     }
 
     #[inline]

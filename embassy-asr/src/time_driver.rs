@@ -26,8 +26,12 @@ use crate::rcc::{self, Peripheral as RccPeripheral};
 const TIMER_TICK_HZ: u64 = 32_768;
 const ARR_MAX: u16 = 0xFFFF;
 
-// Vendor `tremo_lptimer.h` bit definitions (also in RM). ISR/CSR have proper
-// PAC accessors in official `asr6601-pac` 0.1.0; IER/ICR/ARR/CMP/CNT/SR1 are raw.
+// Vendor `tremo_lptimer.h` bit definitions (also in RM). ISR, CSR, CFGR, CR,
+// CMP, ARR, CNT, SR1, IER and ICR all have PAC field accessors, used below.
+// The numeric masks that remain feed the private `wait_isr`/`wait_csr`
+// helpers and the interrupt bitmap, with positions cross-checked against
+// those accessors; CFGR prescaler and CR start bits have no PAC coverage
+// and stay raw.
 const ISR_CMPM: u32 = 1 << 0;
 const ISR_ARRM: u32 = 1 << 1;
 const ISR_CMPOK: u32 = 1 << 3;
@@ -35,12 +39,8 @@ const ISR_ARROK: u32 = 1 << 4;
 const ISR_CFGROK: u32 = 1 << 7;
 const ISR_CROK: u32 = 1 << 8;
 
-const IER_CMPM: u32 = 1 << 0;
-const IER_ARRM: u32 = 1 << 1;
-
 const CFGR_PRESC_MASK: u32 = 0xe00;
 
-const CR_ENABLE: u32 = 1 << 0;
 const CR_CNTSTRT: u32 = 1 << 2;
 
 // AFEC analog register 0x02 bits 13/14 power-gate XO32K. Clearing them matches
@@ -141,7 +141,11 @@ impl LptimTimeDriver {
 
         // Disarm interrupts before reconfiguring so no stale bootloader setup
         // can fire while registers are being reprogrammed.
-        lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !(IER_ARRM | IER_CMPM)) });
+        lptim().ier().modify(|_, w| {
+            w.arrmie().clear_bit();
+            w.cmpmie().clear_bit();
+            w
+        });
         Interrupt::LPTIM0.unpend();
 
         // Configure: internal clock, prescaler /1, no preload, no wave.
@@ -162,27 +166,30 @@ impl LptimTimeDriver {
         lptim().cr().modify(|_, w| w.enable().set_bit());
         wait_isr(ISR_CROK);
 
-        // ARR = max.
-        unsafe { lptim().arr().write_with_zero(|w| w.bits(ARR_MAX as u32)) };
+        // ARR = max (`write_with_zero` is unsafe on ARR in the PAC).
+        unsafe { lptim().arr().write_with_zero(|w| w.arr().bits(ARR_MAX)) };
         wait_isr(ISR_ARROK);
 
         // CMP = 0.
-        unsafe { lptim().cmp().write_with_zero(|w| w.bits(0)) };
+        unsafe { lptim().cmp().write_with_zero(|w| w.cmp().bits(0)) };
         wait_isr(ISR_CMPOK);
 
-        // Clear pending flags.
-        unsafe { lptim().icr().write_with_zero(|w| w.bits(ISR_ARRM | ISR_CMPM)) };
+        // Clear pending flags through per-flag ICR accessors.
+        unsafe {
+            lptim().icr().write_with_zero(|w| {
+                w.arrmcf().set_bit();
+                w.cmpmcf().set_bit();
+                w
+            })
+        };
         wait_csr(ISR_ARRM | ISR_CMPM);
 
         // Enable overflow interrupt; compare enabled on demand.
-        lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_ARRM) });
+        lptim().ier().modify(|_, w| w.arrmie().set_bit());
 
         // Start continuous counting (CNTSTRT missing in PAC; raw from header).
         lptim().cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_CNTSTRT) });
         wait_isr(ISR_CROK);
-
-        // Silence unused-constant warning for ENABLE mask (we use PAC accessor).
-        let _ = CR_ENABLE;
 
         self.period.store(0, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
@@ -195,8 +202,12 @@ impl LptimTimeDriver {
     fn now_inner(&self) -> u64 {
         // Called with interrupts masked to avoid tearing across overflow.
         let period = self.period.load(Ordering::Relaxed);
-        let cnt = lptim().cnt().read().bits() as u16 as u64;
-        let pending = if lptim().isr().read().bits() & ISR_ARRM != 0 { 1 } else { 0 };
+        let cnt = lptim().cnt().read().cnt().bits() as u16 as u64;
+        let pending = if lptim().isr().read().arrm().bit_is_set() {
+            1
+        } else {
+            0
+        };
         ((period as u64 + pending as u64) << 16) | cnt
     }
 
@@ -204,30 +215,30 @@ impl LptimTimeDriver {
         self.alarm.borrow(cs).set(timestamp);
 
         if timestamp == u64::MAX {
-            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
+            lptim().ier().modify(|_, w| w.cmpmie().clear_bit());
             return true;
         }
 
         let now = self.now_inner();
         if timestamp <= now {
-            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
+            lptim().ier().modify(|_, w| w.cmpmie().clear_bit());
             self.alarm.borrow(cs).set(u64::MAX);
             return false;
         }
 
-        let cmp = (timestamp & 0xFFFF) as u32;
-        unsafe { lptim().cmp().write_with_zero(|w| w.bits(cmp)) };
+        let cmp = (timestamp & 0xFFFF) as u16;
+        unsafe { lptim().cmp().write_with_zero(|w| w.cmp().bits(cmp)) };
         wait_isr(ISR_CMPOK);
 
         let diff = timestamp - now;
         if diff < COMPARE_THRESHOLD {
-            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_CMPM) });
+            lptim().ier().modify(|_, w| w.cmpmie().set_bit());
         } else {
-            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
+            lptim().ier().modify(|_, w| w.cmpmie().clear_bit());
         }
 
         if timestamp <= self.now_inner() {
-            lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
+            lptim().ier().modify(|_, w| w.cmpmie().clear_bit());
             self.alarm.borrow(cs).set(u64::MAX);
             return false;
         }
@@ -243,13 +254,13 @@ impl LptimTimeDriver {
         critical_section::with(|cs| {
             let alarm = self.alarm.borrow(cs).get();
             if alarm != u64::MAX && alarm.saturating_sub(t) < COMPARE_THRESHOLD {
-                lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() | IER_CMPM) });
+                lptim().ier().modify(|_, w| w.cmpmie().set_bit());
             }
         });
     }
 
     fn trigger_alarm(&self, cs: CriticalSection) {
-        lptim().ier().modify(|r, w| unsafe { w.bits(r.bits() & !IER_CMPM) });
+        lptim().ier().modify(|_, w| w.cmpmie().clear_bit());
         self.alarm.borrow(cs).set(u64::MAX);
 
         let mut next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now_inner());
@@ -264,7 +275,18 @@ impl LptimTimeDriver {
             return;
         }
 
-        unsafe { lptim().icr().write_with_zero(|w| w.bits(pending)) };
+        // Clear exactly the observed flags through per-flag ICR accessors.
+        unsafe {
+            lptim().icr().write_with_zero(|w| {
+                if pending & ISR_ARRM != 0 {
+                    w.arrmcf().set_bit();
+                }
+                if pending & ISR_CMPM != 0 {
+                    w.cmpmcf().set_bit();
+                }
+                w
+            })
+        };
         if pending & (ISR_ARRM | ISR_CMPM) != 0 {
             wait_csr(pending & (ISR_ARRM | ISR_CMPM));
         }

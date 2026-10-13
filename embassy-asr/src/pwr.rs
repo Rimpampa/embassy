@@ -15,13 +15,7 @@ use embassy_hal_internal::interrupt::InterruptExt;
 use crate::pac::{self, Interrupt};
 use crate::{Peri, interrupt, peripherals};
 
-const CR0_LOW_POWER_MODE_MASK: u32 = 0x03;
-const CR0_WAIT_FOR_EVENT: u32 = 1 << 5;
-
 const CR1_DEEP_SLEEP_ENABLE: u32 = 1 << 4;
-const CR1_TRIM_MASK: u32 = 0x0f << 20;
-const CR1_TRIM_DEFAULT: u32 = 1 << 20;
-const CR1_STOP3_NOT_STANDBY: u32 = 1 << 24;
 
 const FLASH_INFO_TRIM: *const u32 = 0x1000_2010 as *const u32;
 const FLASH_PROTECT_SEQUENCE_0: u32 = 0x8c9d_aebf;
@@ -370,39 +364,42 @@ impl<'d> Pwr<'d> {
     unsafe fn prepare_deep_sleep(&mut self, mode: DeepSleepMode, wait: WaitKind) {
         let pwr = regs();
 
-        pwr.cr1().modify(|r, w| unsafe {
-            let mut bits = r.bits() | CR1_DEEP_SLEEP_ENABLE;
-            if core::ptr::read_volatile(FLASH_INFO_TRIM) & 0x03 == 0 {
-                bits = (bits & !CR1_TRIM_MASK) | CR1_TRIM_DEFAULT;
+        // CR1 bit 4 (deep-sleep enable) has no PAC accessor; set it raw,
+        // then program the trim field through its accessor.
+        pwr.cr1().modify(|r, w| unsafe { w.bits(r.bits() | CR1_DEEP_SLEEP_ENABLE) });
+        if core::ptr::read_volatile(FLASH_INFO_TRIM) & 0x03 == 0 {
+            unsafe {
+                pwr.cr1().modify(|_, w| w.trim().bits(1));
             }
-            w.bits(bits)
+        }
+
+        pwr.cr0().modify(|_, w| {
+            w.wfe().bit(matches!(wait, WaitKind::Event));
+            w
         });
 
-        pwr.cr0().modify(|r, w| unsafe {
-            let bits = match wait {
-                WaitKind::Interrupt => r.bits() & !CR0_WAIT_FOR_EVENT,
-                WaitKind::Event => r.bits() | CR0_WAIT_FOR_EVENT,
-            };
-            w.bits(bits)
-        });
-
+        // `low_power_mode` holds `mode & 0x03` (Standby selects through CR1).
+        let cr0_mode = mode as u8 & 0x03;
         if mode.needs_stop3_sequence() {
             disable_flash_prefetch();
             modify_analog(AFEC_STOP3_CONTROL, |value| value | STOP3_ANALOG_ENABLE);
 
-            pwr.cr0()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !CR0_LOW_POWER_MODE_MASK) | DeepSleepMode::Stop3 as u32) });
-            pwr.cr1().modify(|r, w| unsafe {
-                let bits = match mode {
-                    DeepSleepMode::Stop3 => r.bits() | CR1_STOP3_NOT_STANDBY,
-                    DeepSleepMode::Standby => r.bits() & !CR1_STOP3_NOT_STANDBY,
-                    _ => r.bits(),
-                };
-                w.bits(bits)
+            unsafe {
+                pwr.cr0()
+                    .modify(|_, w| w.low_power_mode().bits(cr0_mode));
+            }
+            pwr.cr1().modify(|_, w| {
+                match mode {
+                    DeepSleepMode::Stop3 => w.lp_mode_ext().set_bit(),
+                    DeepSleepMode::Standby => w.lp_mode_ext().clear_bit(),
+                    _ => w,
+                }
             });
         } else {
-            pwr.cr0()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !CR0_LOW_POWER_MODE_MASK) | mode as u32) });
+            unsafe {
+                pwr.cr0()
+                    .modify(|_, w| w.low_power_mode().bits(cr0_mode));
+            }
         }
     }
 }
