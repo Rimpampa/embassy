@@ -560,7 +560,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Re-apply the vendor init fields while the counter is stopped.
-    pub fn configure(&self, config: Config) -> Result<(), Error> {
+    pub fn configure(&mut self, config: Config) -> Result<(), Error> {
         set_instance_clock_source::<T>(config.clock_source)?;
         self.apply_init(config)
     }
@@ -602,13 +602,17 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Enable or disable the peripheral (`CR.ENABLE`).
-    pub fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
+    pub fn set_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cr().modify(|_, w| w.enable().bit(enabled));
         wait_isr::<T>(ISR_CROK, TimeoutTarget::Crok)
     }
 
     /// Write ARR and wait for `ARROK`.
-    pub fn set_arr(&self, value: u16) -> Result<(), Error> {
+    ///
+    /// The block only latches ARR while enabled: call
+    /// [`set_enabled`](Self::set_enabled)`(true)` first, otherwise this
+    /// returns [`Error::Timeout`] (`Arrok`).
+    pub fn set_arr(&mut self, value: u16) -> Result<(), Error> {
         // `write_with_zero` and the value writer are unsafe on ARR/CMP in
         // the PAC; the value is range-checked by the `u16` type.
         unsafe {
@@ -618,7 +622,9 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Write CMP and wait for `CMPOK`.
-    pub fn set_cmp(&self, value: u16) -> Result<(), Error> {
+    ///
+    /// Requires the timer to be enabled first, like [`set_arr`](Self::set_arr).
+    pub fn set_cmp(&mut self, value: u16) -> Result<(), Error> {
         unsafe {
             self.regs().cmp().write_with_zero(|w| w.cmp().bits(value));
         }
@@ -641,7 +647,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Start counting in single or continuous mode (vendor `lptimer_config_count_mode`).
-    pub fn start(&self, mode: CountMode) -> Result<(), Error> {
+    pub fn start(&mut self, mode: CountMode) -> Result<(), Error> {
         let bit = match mode {
             CountMode::Single => CR_SNGSTRT,
             CountMode::Continuous => CR_CNTSTRT,
@@ -651,7 +657,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Clear a start-mode bit.
-    pub fn stop_mode(&self, mode: CountMode) -> Result<(), Error> {
+    pub fn stop_mode(&mut self, mode: CountMode) -> Result<(), Error> {
         let bit = match mode {
             CountMode::Single => CR_SNGSTRT,
             CountMode::Continuous => CR_CNTSTRT,
@@ -661,13 +667,13 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Enable or disable timeout mode (`CFGR.TIMEOUT`).
-    pub fn set_timeout_enabled(&self, enabled: bool) -> Result<(), Error> {
+    pub fn set_timeout_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.timeout().bit(enabled));
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Enable or disable wake sources used with STOP modes.
-    pub fn set_wakeup(&self, flags: WakeupFlags, enabled: bool) -> Result<(), Error> {
+    pub fn set_wakeup(&mut self, flags: WakeupFlags, enabled: bool) -> Result<(), Error> {
         let mask = flags.bits();
         self.regs().cfgr().modify(|_, w| {
             if mask & WakeupFlags::CMPM.bits() != 0 {
@@ -694,68 +700,68 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Enable or disable waveform generation (`CFGR.WAVE`).
-    pub fn set_wave_enabled(&self, enabled: bool) -> Result<(), Error> {
+    pub fn set_wave_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.wave().bit(enabled));
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Enable or disable encoder mode (`CFGR.ENC`).
-    pub fn set_encoder_enabled(&self, enabled: bool) -> Result<(), Error> {
+    pub fn set_encoder_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.enc().bit(enabled));
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Configure external trigger polarity.
-    pub fn set_trigger_polarity(&self, polarity: TriggerPolarity) -> Result<(), Error> {
+    pub fn set_trigger_polarity(&mut self, polarity: TriggerPolarity) -> Result<(), Error> {
         self.modify_cfgr_bits(CFGR_TRIGEN_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_TRIGEN_MASK, polarity as u32)
     }
 
     /// Configure external trigger source.
-    pub fn set_trigger_source(&self, source: TriggerSource) -> Result<(), Error> {
+    pub fn set_trigger_source(&mut self, source: TriggerSource) -> Result<(), Error> {
         self.modify_cfgr_bits(CFGR_TRIGSEL_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_TRIGSEL_MASK, source as u32)
     }
 
     /// Configure the trigger digital filter value.
-    pub fn set_trigger_filter(&self, filter: TriggerFilter) -> Result<(), Error> {
+    pub fn set_trigger_filter(&mut self, filter: TriggerFilter) -> Result<(), Error> {
         self.modify_cfgr_bits(CFGR_TRGFLT_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_TRGFLT_MASK, filter as u32)
     }
 
     /// Enable or disable the trigger digital filter.
-    pub fn set_trigger_filter_enabled(&self, enabled: bool) -> Result<(), Error> {
+    pub fn set_trigger_filter_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.trgflt_en().bit(enabled));
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Configure the external clock digital filter value.
-    pub fn set_clock_filter(&self, filter: ClockFilter) -> Result<(), Error> {
+    pub fn set_clock_filter(&mut self, filter: ClockFilter) -> Result<(), Error> {
         self.modify_cfgr_bits(CFGR_CKFLT_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_CKFLT_MASK, filter as u32)
     }
 
     /// Enable or disable the external clock digital filter.
-    pub fn set_clock_filter_enabled(&self, enabled: bool) -> Result<(), Error> {
+    pub fn set_clock_filter_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.ckflt_en().bit(enabled));
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Configure external clock edge polarity.
-    pub fn set_clock_polarity(&self, polarity: ClockPolarity) -> Result<(), Error> {
+    pub fn set_clock_polarity(&mut self, polarity: ClockPolarity) -> Result<(), Error> {
         self.modify_cfgr_bits(CFGR_CKPOL_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_CKPOL_MASK, polarity as u32)
     }
 
     /// Configure the counter clock prescaler.
-    pub fn set_prescaler(&self, prescaler: Prescaler) -> Result<(), Error> {
+    pub fn set_prescaler(&mut self, prescaler: Prescaler) -> Result<(), Error> {
         self.modify_cfgr_bits(CFGR_PRESC_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_PRESC_MASK, prescaler as u32)
     }
 
     /// Enable or disable interrupt sources and unmask the NVIC vector when any
     /// source is enabled.
-    pub fn set_interrupt_enabled(&self, flags: InterruptFlags, enabled: bool) {
+    pub fn set_interrupt_enabled(&mut self, flags: InterruptFlags, enabled: bool) {
         let mask = flags.bits();
         self.regs().ier().modify(|r, w| unsafe {
             let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
@@ -779,7 +785,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Clear interrupt status bits (vendor `lptimer_clear_interrupt` + CSR wait).
-    pub fn clear_interrupt(&self, flags: InterruptFlags) -> Result<(), Error> {
+    pub fn clear_interrupt(&mut self, flags: InterruptFlags) -> Result<(), Error> {
         let mask = flags.bits();
         clear_icr_flags(self.regs(), mask);
 
@@ -811,7 +817,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     ///
     /// The handler clears the hardware status; this future consumes the latched
     /// software pending bits for `flags`.
-    pub async fn wait_for(&self, flags: InterruptFlags) -> InterruptFlags {
+    pub async fn wait_for(&mut self, flags: InterruptFlags) -> InterruptFlags {
         let mask = flags.bits();
         poll_fn(|cx| {
             WAKERS[T::INDEX].register(cx.waker());
