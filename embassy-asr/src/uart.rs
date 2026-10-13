@@ -428,7 +428,7 @@ fn erase_pin<'d>(
     pin.map(|(p, af)| (p.into(), af))
 }
 
-fn configure_pin(pin: Peri<'_, impl Pin>, af: AlternateFunction, output: bool) -> Peri<'_, AnyPin> {
+fn configure_pin(pin: Peri<'_, impl Pin>, af: AlternateFunction, output: bool) -> Flex<'_> {
     let mut flex = Flex::new(pin);
     if output {
         flex.set_as_output();
@@ -436,7 +436,7 @@ fn configure_pin(pin: Peri<'_, impl Pin>, af: AlternateFunction, output: bool) -
         flex.set_as_input();
     }
     flex.set_alternate_function(af);
-    flex.into_inner()
+    flex
 }
 
 fn apply_config(info: &'static Info, config: &Config, has_rx: bool, has_tx: bool) -> Result<(), ConfigError> {
@@ -599,16 +599,18 @@ pub struct Uart<'d, M: Mode> {
 /// Transmit half of a UART.
 pub struct UartTx<'d, M: Mode> {
     info: &'static Info,
-    _pin: Option<Peri<'d, AnyPin>>,
-    _rts: Option<Peri<'d, AnyPin>>,
+    // `Flex` (not bare `Peri`) so dropping the half deconfigures the pins
+    // back to analog via `Flex::drop`.
+    _pin: Option<Flex<'d>>,
+    _rts: Option<Flex<'d>>,
     _mode: PhantomData<&'d mut M>,
 }
 
 /// Receive half of a UART.
 pub struct UartRx<'d, M: Mode> {
     info: &'static Info,
-    _pin: Option<Peri<'d, AnyPin>>,
-    _cts: Option<Peri<'d, AnyPin>>,
+    _pin: Option<Flex<'d>>,
+    _cts: Option<Flex<'d>>,
     _mode: PhantomData<&'d mut M>,
 }
 

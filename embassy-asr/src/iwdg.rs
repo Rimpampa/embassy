@@ -163,7 +163,7 @@ impl<'d> IndependentWatchdog<'d> {
     }
 
     /// Stop the watchdog counter.
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         wait_sr_done();
         Self::regs().cr().modify(|_, w| w.start().clear_bit());
         while !Self::regs().sr().read().write_cr_done().bit_is_set() {}
@@ -214,4 +214,12 @@ fn wait_sr_done() {
             && sr.write_sr2_done().bit_is_set()
     };
     while !ready() {}
+}
+
+impl Drop for IndependentWatchdog<'_> {
+    fn drop(&mut self) {
+        // Stop on drop so a discarded handle cannot reset the system out
+        // from under the new owner; keep the handle alive to keep watching.
+        self.stop();
+    }
 }

@@ -51,7 +51,7 @@ impl<'d> Watchdog<'d> {
     }
 
     /// Stop the watchdog and disable its reset request.
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.rst_cr()
@@ -94,6 +94,8 @@ fn lock() {
 
 impl Drop for Watchdog<'_> {
     fn drop(&mut self) {
+        // Stop on drop so a discarded handle cannot reset the system out
+        // from under the new owner; keep the handle alive to keep watching.
         self.stop();
         let _ = rcc::disable_peripheral(Peripheral::Wdg);
     }
