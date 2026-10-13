@@ -15,6 +15,7 @@ use crate::{Peri, pac, peripherals};
 
 /// Snapshot of the documented AFEC raw status signals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct RawStatus {
     rco24m_ready: bool,
     pll_unlocked: bool,
@@ -51,6 +52,7 @@ impl RawStatus {
 /// Consequently, the value can be inspected, but this driver does not provide
 /// field accessors or a way to write it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct InterruptStatus(u32);
 
 impl InterruptStatus {
