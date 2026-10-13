@@ -327,6 +327,7 @@ impl Calibration {
 /// ADC configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Kernel clock source. SDK examples use [`ClockSource::Rco48m`].
     pub clock_source: ClockSource,
@@ -360,14 +361,13 @@ impl Default for Config {
     }
 }
 
-/// ADC driver error.
+/// ADC driver error (conversion-time failures).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Sequence was empty or longer than [`MAX_SEQUENCE_LEN`].
     InvalidSequence,
-    /// Clock divider exceeded `0xFFF`.
-    InvalidClockDivision,
     /// Differential mode is only defined for sample channels 1..=8.
     InvalidDifferentialChannel,
     /// Data register was overwritten before it was read.
@@ -377,6 +377,39 @@ pub enum Error {
     /// Continuous conversion is not running.
     NotRunning,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidSequence => f.write_str("invalid ADC sequence"),
+            Self::InvalidDifferentialChannel => f.write_str("invalid differential channel"),
+            Self::Overrun => f.write_str("ADC overrun"),
+            Self::Busy => f.write_str("ADC conversion already running"),
+            Self::NotRunning => f.write_str("ADC conversion not running"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
+
+/// ADC configuration error (returned by constructors and channel setup).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// Clock divider exceeded `0xFFF`.
+    InvalidClockDivision,
+}
+
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidClockDivision => f.write_str("invalid ADC clock division"),
+        }
+    }
+}
+
+impl core::error::Error for ConfigError {}
 
 /// Owned ASR6601 ADC.
 pub struct Adc<'d, M: Mode = Blocking> {
@@ -388,7 +421,7 @@ pub struct Adc<'d, M: Mode = Blocking> {
 impl<'d> Adc<'d, Blocking> {
     /// Enable clocks, apply `config`, run vendor `adc_init`, and leave the ADC
     /// disabled until a conversion is started.
-    pub fn new_blocking(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, Error> {
+    pub fn new_blocking(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, ConfigError> {
         Self::new_inner(peri, config)
     }
 }
@@ -401,7 +434,7 @@ impl<'d> Adc<'d, Async> {
         peri: Peri<'d, peripherals::ADC>,
         _irq: impl Binding<interrupt::typelevel::ADC, InterruptHandler> + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         let this = Self::new_inner(peri, config)?;
         interrupt::typelevel::ADC::unpend();
         interrupt::typelevel::ADC::set_priority(Priority::P3);
@@ -413,9 +446,9 @@ impl<'d> Adc<'d, Async> {
 }
 
 impl<'d, M: Mode> Adc<'d, M> {
-    fn new_inner(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, Error> {
+    fn new_inner(peri: Peri<'d, peripherals::ADC>, config: Config) -> Result<Self, ConfigError> {
         if config.clock_division as u32 > CFGR_CLK_DIV_MASK {
-            return Err(Error::InvalidClockDivision);
+            return Err(ConfigError::InvalidClockDivision);
         }
 
         set_adc_clock_source(config.clock_source);

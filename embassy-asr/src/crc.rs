@@ -11,6 +11,7 @@ const CRC_DR_ADDR: usize = 0x4002_2004;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum PolySize {
     /// 32-bit polynomial.
     Bits32 = 0x00,
@@ -26,6 +27,7 @@ pub enum PolySize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum ReverseIn {
     /// Do not reverse input bits.
     None = 0x00,
@@ -40,6 +42,7 @@ pub enum ReverseIn {
 /// CRC configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Initial CRC value written to INIT before calculation.
     pub init_value: u32,
@@ -75,6 +78,7 @@ impl Default for Config {
 /// Owned CRC peripheral.
 pub struct Crc<'d> {
     _peri: Peri<'d, peripherals::CRC>,
+    config: Config,
 }
 
 impl<'d> Crc<'d> {
@@ -82,13 +86,14 @@ impl<'d> Crc<'d> {
     pub fn new(peri: Peri<'d, peripherals::CRC>, config: Config) -> Self {
         let _ = rcc::enable_peripheral(Peripheral::Crc);
         let _ = rcc::reset_peripheral(Peripheral::Crc);
-        let this = Self { _peri: peri };
+        let mut this = Self { _peri: peri, config };
         this.configure(config);
         this
     }
 
     /// Reconfigure the CRC engine and latch the initial value.
-    pub fn configure(&self, config: Config) {
+    pub fn configure(&mut self, config: Config) {
+        self.config = config;
         let regs = Self::regs();
         let poly_size = match config.poly_size {
             PolySize::Bits32 => pac::crc::cr::PolySize::Value32,
@@ -113,6 +118,18 @@ impl<'d> Crc<'d> {
                 w.reverse_out_en().bit(config.reverse_out);
                 w.calc_init().set_bit()
             });
+        }
+    }
+
+    /// Restart the running CRC from the configured initial value.
+    ///
+    /// Re-latches `INIT` without touching the polynomial or reversal setup,
+    /// so a second message can reuse the same configuration.
+    pub fn reset(&mut self) {
+        let regs = Self::regs();
+        unsafe {
+            regs.init().write_with_zero(|w| w.bits(self.config.init_value));
+            regs.cr().modify(|_, w| w.calc_init().set_bit());
         }
     }
 

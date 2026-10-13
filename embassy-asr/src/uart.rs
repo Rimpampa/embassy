@@ -303,6 +303,7 @@ impl Default for Config {
 /// Configuration error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum ConfigError {
     /// Baud rate cannot be represented for the active UART clock.
     Baudrate,
@@ -316,9 +317,24 @@ pub enum ConfigError {
     Rcc(rcc::Error),
 }
 
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Baudrate => write!(f, "UART invalid baud rate"),
+            Self::ClocksNotInitialized => write!(f, "UART clocks not initialized"),
+            Self::NoRxOrTx => write!(f, "UART no RX or TX pin"),
+            Self::MissingFlowControlPin => write!(f, "UART missing flow control pin"),
+            Self::Rcc(err) => write!(f, "UART RCC error: {err}"),
+        }
+    }
+}
+
+impl core::error::Error for ConfigError {}
+
 /// UART transfer / framing error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// RX FIFO overrun.
     Overrun,
@@ -423,7 +439,7 @@ fn configure_pin(pin: Peri<'_, impl Pin>, af: AlternateFunction, output: bool) -
     flex.into_inner()
 }
 
-fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool) -> Result<(), ConfigError> {
+fn apply_config(info: &'static Info, config: &Config, has_rx: bool, has_tx: bool) -> Result<(), ConfigError> {
     let uart_clk = uart_clock_hz(info)?;
     let (ibrd, fbrd) = calc_baud_div(uart_clk, config.baudrate).ok_or(ConfigError::Baudrate)?;
 
@@ -753,7 +769,7 @@ impl<'d, M: Mode> Uart<'d, M> {
         let rts_pin = rts.map(|(p, af)| configure_pin(p, af, true));
         let cts_pin = cts.map(|(p, af)| configure_pin(p, af, false));
 
-        apply_config(info, config, has_rx, has_tx)?;
+        apply_config(info, &config, has_rx, has_tx)?;
 
         info.state.refcount.store(2, Ordering::Release);
 
@@ -803,6 +819,20 @@ impl<'d, M: Mode> Uart<'d, M> {
         self.tx.busy()
     }
 
+
+
+    /// Change the baud rate.
+    pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
+        self.tx.set_baudrate(baudrate)
+    }
+
+    /// Reconfigure the UART with new settings.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        self.tx.set_config(config)?;
+        self.rx.set_config(config)?;
+        Ok(())
+    }
+
     /// Blocking DMA write.
     pub fn blocking_write_dma(&mut self, channel: &mut DmaChannel<'_, Blocking>, buffer: &[u8]) -> Result<(), Error> {
         self.tx.blocking_write_dma(channel, buffer)
@@ -821,6 +851,46 @@ impl<'d, M: Mode> Uart<'d, M> {
 impl<'d, M: Mode> UartTx<'d, M> {
     fn regs(&self) -> &'static RegisterBlock {
         self.info.regs()
+    }
+
+    /// Send a break condition (TX line held low for at least one frame time).
+    ///
+    /// This sets the BRK bit in LCR_H, holds it for at least one frame time,
+    /// then clears it.
+    pub fn send_break(&mut self) {
+        let regs = self.regs();
+        // Set BRK bit
+        regs.lcr_h().modify(|_, w| w.brk().set_bit());
+        // Hold for at least one frame time (10 bits at current baud rate)
+        // At minimum baudrate (300), one frame is ~33ms. At 115200, ~87us.
+        // Wait for 10ms which covers all practical baud rates.
+        cortex_m::asm::delay(240_000);
+        // Clear BRK bit
+        regs.lcr_h().modify(|_, w| w.brk().clear_bit());
+    }
+
+    /// Change the baud rate.
+    pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
+        let regs = self.regs();
+        let info = self.info;
+        let uart_clk = if info.pclk0 {
+            crate::rcc::clocks().map(|c| c.pclk0_hz).ok_or(ConfigError::ClocksNotInitialized)?
+        } else {
+            crate::rcc::clocks().map(|c| c.pclk1_hz).ok_or(ConfigError::ClocksNotInitialized)?
+        };
+        let (ibrd, fbrd) = calc_baud_div(uart_clk, baudrate).ok_or(ConfigError::Baudrate)?;
+        unsafe { regs.ibrd().write_with_zero(|w| w.bits(ibrd)); };
+        unsafe { regs.fbrd().write_with_zero(|w| w.bits(fbrd)); };
+        // LCR_H write is needed to latch the new baud rate divisors
+        regs.lcr_h().modify(|r, w| unsafe { w.bits(r.bits()) });
+        Ok(())
+    }
+
+    /// Reconfigure with new settings.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        let info = self.info;
+        apply_config(info, config, true, true)?;
+        Ok(())
     }
 
     /// Blocking write of the entire buffer.
@@ -960,6 +1030,13 @@ impl<'d, M: Mode> UartRx<'d, M> {
         self.info.regs()
     }
 
+    /// Reconfigure with new settings.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        let info = self.info;
+        apply_config(info, config, true, false)?;
+        Ok(())
+    }
+
     /// Blocking read that fills the entire buffer.
     pub fn blocking_read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         let regs = self.regs();
@@ -1067,6 +1144,17 @@ impl<'d> UartRx<'d, Async> {
         };
         set_dma_req(regs, false, false);
         result
+    }
+}
+
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Uart<'d, M> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
     }
 }
 

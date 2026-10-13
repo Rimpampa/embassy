@@ -36,6 +36,7 @@ const ANALOG_27_OUTPUT_ENABLE: u32 = 3 << 11;
 /// DAC trigger source (`CR.TRIG_SRC_SEL` / `TRIG_EN`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum TriggerSource {
     /// GPTIM1 TRGO.
     Gptim1Trgo,
@@ -60,6 +61,7 @@ pub enum TriggerSource {
 /// Edge polarity for hardware trigger sources (`CR.TRIG_TYPE_SEL`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum TriggerType {
     /// Rising edge.
     RisingEdge,
@@ -72,6 +74,7 @@ pub enum TriggerType {
 /// Built-in wave generator selection (`CR.WAVE_SEL`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum WaveType {
     /// No wave generation; convert programmed samples.
     None,
@@ -84,6 +87,7 @@ pub enum WaveType {
 /// Wave amplitude / LFSR mask (`CR.MASK_AMP_SEL`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum WaveLevel {
     /// Amplitude / mask 1.
     Level1,
@@ -110,6 +114,7 @@ pub enum WaveLevel {
 /// DAC interrupt / status flags (`SR`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Interrupt {
     /// Holding-buffer underflow.
     Underflow,
@@ -120,6 +125,7 @@ pub enum Interrupt {
 /// DAC configuration matching `dac_config_t`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Trigger source.
     pub trigger_source: TriggerSource,
@@ -153,12 +159,24 @@ impl Default for Config {
 /// DAC driver error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Sample is outside the 12-bit range `0..=4095`.
     InvalidData,
     /// [`Dac::software_trigger`] / [`Dac::set`] requires [`TriggerSource::Software`].
     TriggerNotSoftware,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidData => f.write_str("DAC sample out of range"),
+            Self::TriggerNotSoftware => f.write_str("DAC trigger source is not software"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// Owned ASR6601 DAC.
 pub struct Dac<'d> {

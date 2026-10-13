@@ -36,10 +36,11 @@ const DIER_IT_MASK: u32 = 0x5f;
 static WAKERS: [AtomicWaker; 4] = [const { AtomicWaker::new() }; 4];
 static PENDING: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 
-/// TIMER driver error.
+/// TIMER configuration error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Error {
+#[non_exhaustive]
+pub enum ConfigError {
     /// Requested frequency cannot be represented with 16-bit PSC/ARR.
     InvalidFrequency,
     /// Kernel clock is unknown (RCC not initialized) or zero.
@@ -48,13 +49,13 @@ pub enum Error {
     Rcc(rcc::Error),
 }
 
-impl From<rcc::Error> for Error {
+impl From<rcc::Error> for ConfigError {
     fn from(value: rcc::Error) -> Self {
         Self::Rcc(value)
     }
 }
 
-impl core::fmt::Display for Error {
+impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidFrequency => write!(f, "TIMER frequency cannot be represented"),
@@ -64,7 +65,7 @@ impl core::fmt::Display for Error {
     }
 }
 
-impl core::error::Error for Error {}
+impl core::error::Error for ConfigError {}
 
 /// Capture/compare channel (vendor 0-based indexing).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +133,7 @@ impl TimerChannel for Ch3 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum ClockDivision {
     Div1 = 0x0,
     Div2 = 0x100,
@@ -141,6 +143,7 @@ pub enum ClockDivision {
 /// PWM output compare mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum PwmMode {
     /// PWM mode 1.
     Mode1,
@@ -219,6 +222,7 @@ impl core::ops::BitOrAssign for InterruptFlags {
 /// Basic up-counter configuration (vendor `timer_init_t`, up mode only).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Config {
     /// Prescaler loaded into `PSC` (`0..=0xFFFF`).
     pub prescaler: u16,
@@ -251,6 +255,7 @@ impl Default for Config {
 /// PWM configuration shared by all channels of one timer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct PwmConfig {
     /// Output compare mode.
     pub mode: PwmMode,
@@ -347,7 +352,7 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     }
 }
 
-fn enable_instance<T: Instance>() -> Result<(), Error> {
+fn enable_instance<T: Instance>() -> Result<(), ConfigError> {
     rcc::enable_peripheral(T::rcc_peripheral())?;
     rcc::reset_peripheral(T::rcc_peripheral())?;
     T::nv_interrupt().disable();
@@ -437,15 +442,15 @@ async fn wait_for_flags<T: Instance>(flags: InterruptFlags) -> InterruptFlags {
     .await
 }
 
-fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), Error> {
+fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), ConfigError> {
     let frequency_hz = frequency.hz();
     if frequency_hz == 0 || pclk == 0 {
-        return Err(Error::InvalidFrequency);
+        return Err(ConfigError::InvalidFrequency);
     }
 
     let ticks = pclk / frequency_hz;
     if ticks == 0 {
-        return Err(Error::InvalidFrequency);
+        return Err(ConfigError::InvalidFrequency);
     }
 
     // Prefer a large ARR for duty-cycle resolution: ticks = (PSC+1)*(ARR+1).
@@ -467,7 +472,7 @@ fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), Error> {
         }
     }
 
-    Err(Error::InvalidFrequency)
+    Err(ConfigError::InvalidFrequency)
 }
 
 // PAC field accessors are used directly in each method below.
@@ -761,7 +766,7 @@ impl<'d, T: Instance> Timer<'d, T> {
     ///
     /// Does not bind the update interrupt; use [`Self::new`] for
     /// interrupt-driven use.
-    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
         Self::create(peri, config)
     }
 
@@ -773,11 +778,11 @@ impl<'d, T: Instance> Timer<'d, T> {
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         Self::create(peri, config)
     }
 
-    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
         enable_instance::<T>()?;
         let this = Self { _peri: peri };
         apply_basic_config::<T>(config);
@@ -823,14 +828,14 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 
     /// Kernel clock frequency in hertz.
-    pub fn clock_hz(&self) -> Result<u32, Error> {
+    pub fn clock_hz(&self) -> Result<u32, ConfigError> {
         T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
-            .ok_or(Error::ClockUnavailable)
+            .ok_or(ConfigError::ClockUnavailable)
     }
 
     /// Tick frequency after the prescaler: `f_kernel / (PSC + 1)`.
-    pub fn tick_hz(&self) -> Result<u32, Error> {
+    pub fn tick_hz(&self) -> Result<u32, ConfigError> {
         let pclk = self.clock_hz()?;
         Ok(pclk / (u32::from(self.prescaler()) + 1))
     }
@@ -993,12 +998,12 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         ch3: Option<PwmPin<'d, T, Ch3>>,
         frequency: Hertz,
         pwm: PwmConfig,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         enable_instance::<T>()?;
 
         let pclk = T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
-            .ok_or(Error::ClockUnavailable)?;
+            .ok_or(ConfigError::ClockUnavailable)?;
         let (prescaler, period) = compute_psc_arr(pclk, frequency)?;
 
         apply_basic_config::<T>(Config {
@@ -1039,10 +1044,10 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
     }
 
     /// Output frequency programmed into PSC/ARR.
-    pub fn frequency_hz(&self) -> Result<u32, Error> {
+    pub fn frequency_hz(&self) -> Result<u32, ConfigError> {
         let pclk = T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
-            .ok_or(Error::ClockUnavailable)?;
+            .ok_or(ConfigError::ClockUnavailable)?;
         let psc = u32::from(T::regs().psc().read().psc().bits()) + 1;
         let arr = u32::from(T::regs().arr().read().arr().bits()) + 1;
         Ok(pclk / psc / arr)
@@ -1121,7 +1126,7 @@ impl<'d, T: Instance> InputCapture<'d, T> {
         pin: CapturePin<'d, T, C>,
         config: Config,
         polarity: CapturePolarity,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConfigError> {
         enable_instance::<T>()?;
         apply_basic_config::<T>(config);
         configure_capture_channel::<T>(C::CHANNEL, polarity);

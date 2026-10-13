@@ -1045,6 +1045,25 @@ impl<'d> I2c<'d, Async> {
     }
 }
 
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for I2c<'d, M> {
+    type Config = Config;
+    type ConfigError = Error;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        // I2c is always master; I2cSlave is a separate type. Reprogram the
+        // timing as at construction; only call this with the bus idle.
+        init_master(self.info, *config)?;
+        self.scl.set_pull(config.scl_pull);
+        self.sda.set_pull(config.sda_pull);
+        self.scl_pull = config.scl_pull;
+        self.sda_pull = config.sda_pull;
+        self.frequency = config.frequency;
+        Ok(())
+    }
+}
+
 impl<'d, M: Mode> Drop for I2c<'d, M> {
     fn drop(&mut self) {
         shutdown(self.info);

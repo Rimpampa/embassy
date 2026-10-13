@@ -125,6 +125,7 @@ pub enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Request {
     /// LoRa controller transmit.
     LoracTx = 4,
@@ -245,6 +246,7 @@ impl Reload {
 /// Complete configuration for one DMA block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct TransferConfig {
     /// Transfer direction.
     pub direction: Direction,
@@ -365,6 +367,7 @@ impl Default for BurstSize {
 /// DMA configuration or transfer error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// The transfer contains no items.
     EmptyTransfer,

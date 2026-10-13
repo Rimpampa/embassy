@@ -15,6 +15,7 @@ const BOOT_MODE_FLAG: u32 = 1 << 29;
 /// DMA controller whose request input is being routed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum DmaController {
     /// DMA controller 0, routed through SYSCFG CR0.
     Dma0,
@@ -25,6 +26,7 @@ pub enum DmaController {
 /// Channel within a DMA controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum DmaChannel {
     Channel0,
     Channel1,
@@ -39,6 +41,7 @@ pub enum DmaChannel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum DmaRequest {
     LoracTx = 4,
     LoracRx = 5,
@@ -94,6 +97,7 @@ pub enum DmaRequest {
 /// I2S sample word size used to derive the vendor word-select divisor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum I2sWordSize {
     /// The DesignWare I2S "don't care" encoding.
     DontCare,
