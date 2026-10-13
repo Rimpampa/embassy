@@ -667,34 +667,33 @@ pub struct LpuartRx<'d, M: Mode> {
 impl<'d> Lpuart<'d, Blocking> {
     /// Create a blocking LPUART.
     ///
-    /// `rx` / `tx` are `(pin, alternate_function)` pairs. See [`pins`] for the
+    /// `tx` / `rx` are `(pin, alternate_function)` pairs. See [`pins`] for the
     /// datasheet AF numbers. Supply `None` for unused directions.
     pub fn new_blocking(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner(peri, erase_pin(rx), erase_pin(tx), None, None, config, false)
+        Self::new_inner(peri, erase_pin(tx), erase_pin(rx), None, None, config)
     }
 
     /// Create a blocking LPUART with explicit RTS/CTS pins and AF selectors.
     pub fn new_blocking_with_flow_control(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         config: Config,
     ) -> Result<Self, ConfigError> {
         Self::new_inner(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
-            false,
         )
     }
 }
@@ -705,33 +704,36 @@ impl<'d> Lpuart<'d, Async> {
     /// `irq` proves the LPUART vector is bound to [`InterruptHandler`].
     pub fn new(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<interrupt::typelevel::LPUART, InterruptHandler> + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner(peri, erase_pin(rx), erase_pin(tx), None, None, config, true)
+        let this = Self::new_inner(peri, erase_pin(tx), erase_pin(rx), None, None, config)?;
+        this.enable_interrupts();
+        Ok(this)
     }
 
     /// Create an asynchronous LPUART with explicit RTS/CTS pins and AF selectors.
     pub fn new_with_flow_control(
         peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         cts: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         _irq: impl Binding<interrupt::typelevel::LPUART, InterruptHandler> + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
-        Self::new_inner(
+        let this = Self::new_inner(
             peri,
-            erase_pin(rx),
             erase_pin(tx),
+            erase_pin(rx),
             erase_pin(rts),
             erase_pin(cts),
             config,
-            true,
-        )
+        )?;
+        this.enable_interrupts();
+        Ok(this)
     }
 
     /// Write `buffer` using interrupt-driven TX.
@@ -761,14 +763,25 @@ impl<'d> Lpuart<'d, Async> {
 }
 
 impl<'d, M: Mode> Lpuart<'d, M> {
+    /// Arm the NVIC vector for interrupt-driven use.
+    ///
+    /// Called by the async constructors only; blocking instances never
+    /// enable the vector.
+    fn enable_interrupts(&self) {
+        interrupt::typelevel::LPUART::unpend();
+        interrupt::typelevel::LPUART::set_priority(Priority::P3);
+        unsafe {
+            interrupt::typelevel::LPUART::enable();
+        }
+    }
+
     fn new_inner(
         _peri: Peri<'d, peripherals::LPUART>,
-        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         tx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
+        rx: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         rts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         cts: Option<(Peri<'d, AnyPin>, AlternateFunction)>,
         config: Config,
-        enable_irq: bool,
     ) -> Result<Self, ConfigError> {
         match config.flow_control {
             FlowControl::Rts if rts.is_none() => return Err(ConfigError::MissingFlowControlPin),
@@ -799,14 +812,6 @@ impl<'d, M: Mode> Lpuart<'d, M> {
         set_rx_enable(regs, has_rx);
 
         info.state.refcount.store(2, Ordering::Release);
-
-        if enable_irq {
-            interrupt::typelevel::LPUART::unpend();
-            interrupt::typelevel::LPUART::set_priority(Priority::P3);
-            unsafe {
-                interrupt::typelevel::LPUART::enable();
-            }
-        }
 
         Ok(Self {
             tx: LpuartTx {
@@ -849,6 +854,11 @@ impl<'d, M: Mode> Lpuart<'d, M> {
         self.tx.blocking_flush()
     }
 
+    /// Whether the transmitter is currently busy (last byte not yet sent).
+    pub fn busy(&self) -> bool {
+        self.tx.busy()
+    }
+
     /// Blocking DMA write.
     pub fn blocking_write_dma(&mut self, channel: &mut DmaChannel<'_, Blocking>, buffer: &[u8]) -> Result<(), Error> {
         self.tx.blocking_write_dma(channel, buffer)
@@ -889,6 +899,11 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
         while !tx_done(regs) {}
         clear_tx_done(regs);
         Ok(())
+    }
+
+    /// Whether the transmitter is currently busy (last byte not yet sent).
+    pub fn busy(&self) -> bool {
+        !tx_done(self.regs())
     }
 
     /// Blocking DMA write.

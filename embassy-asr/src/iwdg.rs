@@ -61,11 +61,16 @@ pub struct IndependentWatchdog<'d> {
 }
 
 impl<'d> IndependentWatchdog<'d> {
-    /// Enable clocks, apply `config`, and leave the watchdog stopped.
+    /// Enable clocks, apply `config`, and start the watchdog.
+    ///
+    /// Like `embassy-stm32`'s independent watchdog, construction starts
+    /// watching: keep the handle alive (and keep petting) to avoid a reset.
+    /// [`stop`](Self::stop) halts it; dropping the handle stops it as well.
     pub fn new(peri: Peri<'d, peripherals::IWDG>, config: Config) -> Self {
         let _ = rcc::enable_peripheral(Peripheral::Iwdg);
         let this = Self { _peri: peri };
         this.configure(config);
+        this.start();
         this
     }
 

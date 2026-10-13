@@ -555,7 +555,7 @@ impl<'d> I2c<'d, Blocking> {
         sda_af: AlternateFunction,
         config: Config,
     ) -> Result<Self, Error> {
-        Self::new_inner(peri, scl, scl_af, sda, sda_af, config, false)
+        Self::new_inner(peri, scl, scl_af, sda, sda_af, config)
     }
 }
 
@@ -583,11 +583,25 @@ impl<'d> I2c<'d, Async> {
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
-        Self::new_inner(peri, scl, scl_af, sda, sda_af, config, true)
+        let this = Self::new_inner(peri, scl, scl_af, sda, sda_af, config)?;
+        this.enable_interrupts::<T>();
+        Ok(this)
     }
 }
 
 impl<'d, M: Mode> I2c<'d, M> {
+    /// Arm the NVIC vector for interrupt-driven use.
+    ///
+    /// Called by the async constructors only; blocking instances never
+    /// enable the vector.
+    fn enable_interrupts<T: Instance>(&self) {
+        T::Interrupt::unpend();
+        T::Interrupt::set_priority(Priority::P3);
+        unsafe {
+            T::Interrupt::enable();
+        }
+    }
+
     fn new_inner<T: Instance>(
         _peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -595,7 +609,6 @@ impl<'d, M: Mode> I2c<'d, M> {
         sda: Peri<'d, impl GpioPin + 'd>,
         sda_af: AlternateFunction,
         config: Config,
-        enable_irq: bool,
     ) -> Result<Self, Error> {
         let info = T::info();
         enable_clock(info)?;
@@ -604,14 +617,6 @@ impl<'d, M: Mode> I2c<'d, M> {
         let sda = configure_i2c_pin(sda, sda_af, config.sda_pull);
 
         init_master(info, config)?;
-
-        if enable_irq {
-            T::Interrupt::unpend();
-            T::Interrupt::set_priority(Priority::P3);
-            unsafe {
-                T::Interrupt::enable();
-            }
-        }
 
         Ok(Self {
             info,
@@ -1070,7 +1075,7 @@ impl<'d> I2cSlave<'d, Blocking> {
         scl_pull: Pull,
         sda_pull: Pull,
     ) -> Result<Self, Error> {
-        Self::new_inner(peri, scl, scl_af, sda, sda_af, address, scl_pull, sda_pull, false)
+        Self::new_inner(peri, scl, scl_af, sda, sda_af, address, scl_pull, sda_pull)
     }
 }
 
@@ -1100,11 +1105,25 @@ impl<'d> I2cSlave<'d, Async> {
         sda_pull: Pull,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
     ) -> Result<Self, Error> {
-        Self::new_inner(peri, scl, scl_af, sda, sda_af, address, scl_pull, sda_pull, true)
+        let this = Self::new_inner(peri, scl, scl_af, sda, sda_af, address, scl_pull, sda_pull)?;
+        this.enable_interrupts::<T>();
+        Ok(this)
     }
 }
 
 impl<'d, M: Mode> I2cSlave<'d, M> {
+    /// Arm the NVIC vector for interrupt-driven use.
+    ///
+    /// Called by the async constructors only; blocking instances never
+    /// enable the vector.
+    fn enable_interrupts<T: Instance>(&self) {
+        T::Interrupt::unpend();
+        T::Interrupt::set_priority(Priority::P3);
+        unsafe {
+            T::Interrupt::enable();
+        }
+    }
+
     fn new_inner<T: Instance>(
         _peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -1114,7 +1133,6 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
         address: u8,
         scl_pull: Pull,
         sda_pull: Pull,
-        enable_irq: bool,
     ) -> Result<Self, Error> {
         let info = T::info();
         enable_clock(info)?;
@@ -1123,14 +1141,6 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
         let sda = configure_i2c_pin(sda, sda_af, sda_pull);
 
         init_slave(info, address)?;
-
-        if enable_irq {
-            T::Interrupt::unpend();
-            T::Interrupt::set_priority(Priority::P3);
-            unsafe {
-                T::Interrupt::enable();
-            }
-        }
 
         Ok(Self {
             info,
