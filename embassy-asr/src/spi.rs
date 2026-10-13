@@ -29,15 +29,10 @@ use crate::pac::ssp0::RegisterBlock;
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
-// PL022 / tremo_spi register bits (fields missing from the PAC).
-const CR0_FRF_SHIFT: u32 = 4;
-const CR0_SPO: u32 = 1 << 6;
-const CR0_SPH: u32 = 1 << 7;
-const CR0_SCR_SHIFT: u32 = 8;
-const CR0_SCR_MASK: u32 = 0xff << CR0_SCR_SHIFT;
-
-const CR1_SSE: u32 = 1 << 1;
-const CR1_MS: u32 = 1 << 2;
+// PL022 / tremo_spi register layout is fully described by the PAC field
+// accessors used below; no hand-written bit positions remain in this driver.
+//
+// The masks below back `wait_sr` until the async-wait rework replaces it.
 
 const SR_TFE: u32 = 1 << 0;
 const SR_TNF: u32 = 1 << 1;
@@ -48,17 +43,6 @@ const INT_ROR: u32 = 1 << 0;
 const INT_RT: u32 = 1 << 1;
 const INT_RX: u32 = 1 << 2;
 const INT_TX: u32 = 1 << 3;
-
-const DMA_RX: u32 = 1 << 0;
-const DMA_TX: u32 = 1 << 1;
-
-const DSS_4BIT: u32 = 0x3;
-const DSS_8BIT: u32 = 0x7;
-const DSS_16BIT: u32 = 0xf;
-
-const FRF_MOTOROLA: u32 = 0x0;
-const FRF_TI: u32 = 0x1;
-const FRF_MICROWIRE: u32 = 0x2;
 
 const RESULT_OK: u8 = 0;
 const RESULT_OVERRUN: u8 = 1;
@@ -131,16 +115,6 @@ pub enum FrameFormat {
     Microwire,
 }
 
-impl FrameFormat {
-    const fn cr0_bits(self) -> u32 {
-        match self {
-            Self::Motorola => FRF_MOTOROLA,
-            Self::Ti => FRF_TI,
-            Self::Microwire => FRF_MICROWIRE,
-        }
-    }
-}
-
 /// SSP data size (`CR0.DSS`), matching the vendor SDK constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -154,14 +128,6 @@ pub enum DataWidth {
 }
 
 impl DataWidth {
-    const fn dss(self) -> u32 {
-        match self {
-            Self::Bits4 => DSS_4BIT,
-            Self::Bits8 => DSS_8BIT,
-            Self::Bits16 => DSS_16BIT,
-        }
-    }
-
     const fn is_u16(self) -> bool {
         matches!(self, Self::Bits16)
     }
@@ -261,21 +227,25 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
         let info = T::info();
         let regs = &*info.regs;
-        let mis = regs.mis().read().bits();
+        let mis = regs.mis().read();
 
-        if mis & INT_ROR != 0 {
+        if mis.rormis().bit_is_set() {
             info.state.result.store(RESULT_OVERRUN, Ordering::Release);
-            regs.icr().write_with_zero(|w| w.bits(INT_ROR));
+            unsafe {
+                regs.icr().write_with_zero(|w| w.roric().set_bit());
+            }
         }
-        if mis & INT_RT != 0 {
-            regs.icr().write_with_zero(|w| w.bits(INT_RT));
+        if mis.rtmis().bit_is_set() {
+            unsafe {
+                regs.icr().write_with_zero(|w| w.rtic().set_bit());
+            }
         }
 
         // Mask level-sensitive FIFO interrupts; the waiter re-enables as needed.
-        let mask = mis & (INT_TX | INT_RX);
-        if mask != 0 {
-            regs.imsc().modify(|r, w| w.bits(r.bits() & !mask));
-        }
+        regs.imsc().modify(|_, w| {
+            w.txim().clear_bit();
+            w.rxim().clear_bit()
+        });
 
         info.state.waker.wake();
     }
@@ -390,8 +360,11 @@ impl<'d, M: Mode> Spi<'d, M> {
         info.state.result.store(RESULT_OK, Ordering::Release);
         unsafe {
             let regs = &*info.regs;
-            regs.imsc().write_with_zero(|w| w.bits(0));
-            regs.icr().write_with_zero(|w| w.bits(INT_ROR | INT_RT));
+            regs.imsc().write_with_zero(|w| w);
+            regs.icr().write_with_zero(|w| {
+                w.roric().set_bit();
+                w.rtic().set_bit()
+            });
         }
 
         if enable_irq {
@@ -417,48 +390,58 @@ impl<'d, M: Mode> Spi<'d, M> {
         };
         let (cpsdvsr, scr) = calc_dividers(pclk, config.frequency)?;
 
-        let mut cr0 = config.data_width.dss();
-        cr0 |= config.frame_format.cr0_bits() << CR0_FRF_SHIFT;
-        if config.mode.polarity == Polarity::IdleHigh {
-            cr0 |= CR0_SPO;
-        }
-        if config.mode.phase == Phase::CaptureOnSecondTransition {
-            cr0 |= CR0_SPH;
-        }
-        cr0 |= (scr as u32) << CR0_SCR_SHIFT;
+        let dss = match config.data_width {
+            DataWidth::Bits4 => pac::ssp0::cr0::Dss::Value4,
+            DataWidth::Bits8 => pac::ssp0::cr0::Dss::Value8,
+            DataWidth::Bits16 => pac::ssp0::cr0::Dss::Value16,
+        };
+        let frf = match config.frame_format {
+            FrameFormat::Motorola => pac::ssp0::cr0::Frf::Motorola,
+            FrameFormat::Ti => pac::ssp0::cr0::Frf::Ti,
+            FrameFormat::Microwire => pac::ssp0::cr0::Frf::Microwire,
+        };
 
         self.set_enabled(false);
         unsafe {
             let regs = &*self.info.regs;
-            regs.cpsr().write_with_zero(|w| w.bits(cpsdvsr as u32));
-            regs.cr0().write_with_zero(|w| w.bits(cr0));
+            regs.cpsr().write_with_zero(|w| w.cpsdvsr().bits(cpsdvsr));
+            regs.cr0().write_with_zero(|w| {
+                w.dss().variant(dss);
+                w.frf().variant(frf);
+                w.spo().bit(config.mode.polarity == Polarity::IdleHigh);
+                w.sph().bit(config.mode.phase == Phase::CaptureOnSecondTransition);
+                w.scr().bits(scr)
+            });
             // Master mode, SSP disabled until set_enabled(true).
-            regs.cr1().write_with_zero(|w| w.bits(0));
-            let mut dma_cr = 0;
-            if self.tx_dma.is_some() {
-                dma_cr |= DMA_TX;
-            }
-            if self.rx_dma.is_some() {
-                dma_cr |= DMA_RX;
-            }
-            regs.dmacr().write_with_zero(|w| w.bits(dma_cr));
+            regs.cr1().write_with_zero(|w| w);
+            regs.dmacr().write_with_zero(|w| {
+                w.txdmae().bit(self.tx_dma.is_some());
+                w.rxdmae().bit(self.rx_dma.is_some())
+            });
         }
         self.data_width = config.data_width;
         Ok(())
     }
 
     fn set_enabled(&mut self, enabled: bool) {
-        unsafe {
-            let regs = &*self.info.regs;
-            regs.cr1().modify(|r, w| {
-                let bits = if enabled {
-                    (r.bits() & !CR1_MS) | CR1_SSE
-                } else {
-                    r.bits() & !CR1_SSE
-                };
-                w.bits(bits)
-            });
-        }
+        let regs = unsafe { &*self.info.regs };
+        regs.cr1().modify(|_, w| {
+            // Master mode is fixed; enabling sets SSE, disabling clears it.
+            w.ms().clear_bit();
+            w.sse().bit(enabled)
+        });
+    }
+
+    fn tx_fifo_not_full(&self) -> bool {
+        unsafe { (*self.info.regs).sr().read().tnf().bit_is_set() }
+    }
+
+    fn rx_fifo_not_empty(&self) -> bool {
+        unsafe { (*self.info.regs).sr().read().rne().bit_is_set() }
+    }
+
+    fn tx_fifo_empty(&self) -> bool {
+        unsafe { (*self.info.regs).sr().read().tfe().bit_is_set() }
     }
 
     fn sr(&self) -> u32 {
@@ -475,22 +458,25 @@ impl<'d, M: Mode> Spi<'d, M> {
     fn drain_rx(&mut self) {
         unsafe {
             let regs = &*self.info.regs;
-            while regs.sr().read().bits() & SR_RNE != 0 {
-                let _ = regs.dr().read().bits();
+            while regs.sr().read().rne().bit_is_set() {
+                let _ = regs.dr().read().data().bits();
             }
-            regs.icr().write_with_zero(|w| w.bits(INT_ROR | INT_RT));
+            regs.icr().write_with_zero(|w| {
+                w.roric().set_bit();
+                w.rtic().set_bit()
+            });
         }
         self.info.state.result.store(RESULT_OK, Ordering::Release);
     }
 
     fn write_frame(&mut self, frame: u16) {
         unsafe {
-            (*self.info.regs).dr().write_with_zero(|w| w.bits(frame as u32));
+            (*self.info.regs).dr().write_with_zero(|w| w.data().bits(frame));
         }
     }
 
     fn read_frame(&mut self) -> u16 {
-        unsafe { (*self.info.regs).dr().read().bits() as u16 }
+        unsafe { (*self.info.regs).dr().read().data().bits() }
     }
 
     /// Reconfigure the SPI peripheral.
@@ -511,9 +497,8 @@ impl<'d, M: Mode> Spi<'d, M> {
         self.set_enabled(false);
         unsafe {
             let regs = &*self.info.regs;
-            regs.cpsr().write_with_zero(|w| w.bits(cpsdvsr as u32));
-            regs.cr0()
-                .modify(|r, w| w.bits((r.bits() & !CR0_SCR_MASK) | ((scr as u32) << CR0_SCR_SHIFT)));
+            regs.cpsr().write_with_zero(|w| w.cpsdvsr().bits(cpsdvsr));
+            regs.cr0().modify(|_, w| w.scr().bits(scr));
         }
         self.set_enabled(true);
         Ok(())
@@ -529,9 +514,9 @@ impl<'d, M: Mode> Spi<'d, M> {
     pub fn blocking_write(&mut self, data: &[u8]) -> Result<(), Error> {
         self.ensure_u8()?;
         for &b in data {
-            while self.sr() & SR_TNF == 0 {}
+            while !self.tx_fifo_not_full() {}
             self.write_frame(b as u16);
-            while self.sr() & SR_RNE == 0 {}
+            while !self.rx_fifo_not_empty() {}
             let _ = self.read_frame();
         }
         self.blocking_flush()?;
@@ -550,9 +535,9 @@ impl<'d, M: Mode> Spi<'d, M> {
         let len = read.len().max(write.len());
         for i in 0..len {
             let tx = write.get(i).copied().unwrap_or(0);
-            while self.sr() & SR_TNF == 0 {}
+            while !self.tx_fifo_not_full() {}
             self.write_frame(tx as u16);
-            while self.sr() & SR_RNE == 0 {}
+            while !self.rx_fifo_not_empty() {}
             let rx = self.read_frame() as u8;
             if let Some(slot) = read.get_mut(i) {
                 *slot = rx;
@@ -565,9 +550,9 @@ impl<'d, M: Mode> Spi<'d, M> {
     pub fn blocking_transfer_in_place(&mut self, data: &mut [u8]) -> Result<(), Error> {
         self.ensure_u8()?;
         for b in data {
-            while self.sr() & SR_TNF == 0 {}
+            while !self.tx_fifo_not_full() {}
             self.write_frame(*b as u16);
-            while self.sr() & SR_RNE == 0 {}
+            while !self.rx_fifo_not_empty() {}
             *b = self.read_frame() as u8;
         }
         self.blocking_flush()
@@ -579,9 +564,9 @@ impl<'d, M: Mode> Spi<'d, M> {
             return Err(Error::InvalidDataWidth);
         }
         for &w in data {
-            while self.sr() & SR_TNF == 0 {}
+            while !self.tx_fifo_not_full() {}
             self.write_frame(w);
-            while self.sr() & SR_RNE == 0 {}
+            while !self.rx_fifo_not_empty() {}
             let _ = self.read_frame();
         }
         self.blocking_flush()?;
@@ -595,9 +580,9 @@ impl<'d, M: Mode> Spi<'d, M> {
             return Err(Error::InvalidDataWidth);
         }
         for slot in data.iter_mut() {
-            while self.sr() & SR_TNF == 0 {}
+            while !self.tx_fifo_not_full() {}
             self.write_frame(0);
-            while self.sr() & SR_RNE == 0 {}
+            while !self.rx_fifo_not_empty() {}
             *slot = self.read_frame();
         }
         self.blocking_flush()

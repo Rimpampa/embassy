@@ -9,8 +9,6 @@ use rand_core::RngCore;
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
 
-const RNGCLKEN: u32 = 1 << 7;
-const RNGEN: u32 = 1 << 7;
 const DATARDY: u32 = 1 << 0;
 const DATACKERR: u32 = 1 << 1;
 
@@ -66,10 +64,17 @@ impl<'d> Rng<'d> {
     pub fn configure(&self, config: Config) {
         let regs = Self::regs();
         unsafe {
-            regs.rngclk()
-                .write_with_zero(|w| w.bits((config.divider as u32 & 0x7f) | RNGCLKEN));
-            regs.rngcr()
-                .write_with_zero(|w| w.bits((config.mode as u32 & 0x7f) | RNGEN));
+            regs.rngclk().write_with_zero(|w| {
+                w.div().bits(config.divider & 0x7f);
+                w.clock_enable().set_bit()
+            });
+            // RNGCR.MODE bits [6:0] have no PAC accessor (bit 6 overlaps
+            // TRUE_RANDOM_MODE with undocumented semantics, see `Config`);
+            // compose them raw and set the enable through the accessor.
+            regs.rngcr().write_with_zero(|w| {
+                w.bits(u32::from(config.mode) & 0x7f);
+                w.enable().set_bit()
+            });
         }
     }
 
@@ -77,8 +82,8 @@ impl<'d> Rng<'d> {
     pub fn close(&self) {
         let regs = Self::regs();
         unsafe {
-            regs.rngcr().write_with_zero(|w| w.bits(0));
-            regs.rngclk().write_with_zero(|w| w.bits(0));
+            regs.rngcr().write_with_zero(|w| w.enable().clear_bit());
+            regs.rngclk().write_with_zero(|w| w.clock_enable().clear_bit());
         }
     }
 
