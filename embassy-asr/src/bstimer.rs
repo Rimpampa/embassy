@@ -2,6 +2,9 @@
 //!
 //! Register programming follows the vendor `tremo_bstimer` driver and the
 //! `bstimer/onepulse` / DAC trigger examples.
+//!
+//! PAC gap: CR2 (MMS), CNT, PSC, ARR have no field accessors and remain raw.
+//! CR1, DIER, SR, EGR have field accessors used below.
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
@@ -284,13 +287,14 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     /// Clear `SR.UIF`.
     ///
     /// The vendor BSTIMER driver never clears this flag; GPTIMER does via
-    /// `SR &= ~UIF`. This uses the same write-clear sequence through a raw
-    /// pointer because the PAC marks `SR` read-only.
+    /// `SR &= ~UIF`. The PAC marks `SR` read-only, so use the raw write
+    /// that matches GPTIMER's `timer_clear_status` (write-0 to the flag).
     pub fn clear_update_flag(&mut self) {
         clear_update_flag_raw(T::sr_ptr());
     }
 
     /// Generate an update event (`EGR.UG`), reloading the prescaler shadow.
+    /// EGR has field accessor for UG.
     pub fn generate_update(&self) {
         unsafe {
             T::regs().egr().write_with_zero(|w| w.ug().set_bit());

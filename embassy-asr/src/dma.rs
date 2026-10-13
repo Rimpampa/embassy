@@ -2,6 +2,17 @@
 //!
 //! The two DMA controllers are Synopsys DesignWare AHB DMAC instances. Each
 //! controller has four channels and one shared interrupt.
+//!
+//! PAC field accessors exist for controller-level registers (DMACFGREG,
+//! CHENREG, CLEAR_TFR, CLEAR_BLOCK, CLEAR_ERR, MASK_TFR, MASK_BLOCK,
+//! MASK_ERR, STATUS_TFR, STATUS_BLOCK, STATUS_ERR, STATUS_SRC_TRAN,
+//! STATUS_DST_TRAN, CHENREG, CFG0-CFG3 per channel) and are used below.
+//! The per-channel CFG0-CFG3 status/control bitfields and request router
+//! (`DMACFGREG`, `CHENREG`) remain raw offsets from the vendor header.
+//!
+//! The PAC models each channel register as a single `u64` while the vendor
+//! driver addresses split low/high halves; channel-register helpers below
+//! bridge that gap.
 
 use core::fmt;
 use core::future::Future;
@@ -572,6 +583,14 @@ pub struct Channel<'d, M: Mode> {
 
 impl<'d> Channel<'d, Blocking> {
     /// Create a channel for polling and blocking transfers.
+    ///
+    /// # Safety contract
+    ///
+    /// The channel token proves exclusive ownership, but this driver erases
+    /// it to controller/channel indices and cannot distinguish two tokens
+    /// for the same channel minted via `Peripherals::steal`. Do not
+    /// construct two live `Channel`s for one hardware channel; concurrent
+    /// use programs the same registers and corrupts both transfers.
     pub fn new_blocking<T: ChannelInstance>(_channel: Peri<'d, T>) -> Self {
         Self::from_instance::<T>()
     }
@@ -678,6 +697,9 @@ impl<'d> Channel<'d, Blocking> {
 
 impl<'d> Channel<'d, Async> {
     /// Create an interrupt-driven DMA channel.
+    ///
+    /// Same ownership contract as [`Channel::new_blocking`]: one live
+    /// `Channel` per hardware channel.
     pub fn new<T: ChannelInstance>(
         _channel: Peri<'d, T>,
         _irq: impl Binding<<T::Controller as ControllerInstance>::Interrupt, InterruptHandler<T::Controller>> + 'd,
@@ -1163,6 +1185,9 @@ impl<'d, M: Mode> Channel<'d, M> {
     }
 
     /// Stop the channel and wait until it can no longer access memory.
+    ///
+    /// Best-effort on wedged hardware: the suspend/disable acknowledges are
+    /// bounded, so a stuck channel cannot hang `Drop` forever.
     pub fn abort(&mut self) {
         self.mask_interrupts();
 
@@ -1204,6 +1229,10 @@ pub struct Transfer<'a, M: Mode> {
 
 impl<'a, M: Mode> Transfer<'a, M> {
     /// Return whether the transfer has reached its completion event.
+    ///
+    /// Idempotent peek behind a shared reference: `poll_result` caches the
+    /// terminal outcome in channel state, so calling this and then awaiting
+    /// the transfer reports the same result (no event is consumed).
     pub fn is_finished(&self) -> bool {
         self.channel.poll_result().is_some()
     }

@@ -784,6 +784,12 @@ impl<'d, M: Mode> Uart<'d, M> {
     }
 
     /// Reborrow as independent TX and RX drivers.
+    ///
+    /// Deliberately `&mut` borrows rather than the guideline's owned-halves
+    /// form: the two halves share one peripheral closed over by a shutdown
+    /// refcount (see the `Drop` impls below), so owned `split_ref` halves
+    /// would run `Drop` on scope exit and shut the peripheral down while the
+    /// driver is still alive.
     pub fn split_ref(&mut self) -> (&mut UartTx<'d, M>, &mut UartRx<'d, M>) {
         (&mut self.tx, &mut self.rx)
     }
