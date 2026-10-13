@@ -313,6 +313,7 @@ impl Default for Config {
 /// Configuration error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum ConfigError {
     /// Baud rate cannot be represented for the selected LPUART clock.
     Baudrate,
@@ -327,6 +328,7 @@ pub enum ConfigError {
 /// LPUART transfer / framing error.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// RX overflow (`LPUART_SR0_RX_OVERFLOW_STATE`).
     Overrun,
@@ -500,7 +502,7 @@ fn enable_clock(source: ClockSource) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn apply_config(regs: &RegisterBlock, config: Config) -> Result<(), ConfigError> {
+fn apply_config(regs: &RegisterBlock, config: &Config) -> Result<(), ConfigError> {
     let (ibaud, fbaud) = calc_baud(config.clock_source.frequency_hz(), config.baudrate).ok_or(ConfigError::Baudrate)?;
 
     let data_len = match config.data_bits {
@@ -554,6 +556,18 @@ fn apply_config(regs: &RegisterBlock, config: Config) -> Result<(), ConfigError>
     regs.cr1().modify(|_, w| w.cts_enable().bit(cts));
 
     Ok(())
+}
+
+/// Functional clock currently selected in `RCC.CR1`, for baud re-computation.
+fn current_clock_source() -> ClockSource {
+    let sel = unsafe { pac::Rcc::steal() }.cr1().read().lpuart_clk_sel();
+    if sel.is_rco4m() {
+        ClockSource::Rco4m
+    } else if sel.is_rco32k() {
+        ClockSource::Rco32k
+    } else {
+        ClockSource::Xo32k
+    }
 }
 
 fn set_rx_enable(regs: &RegisterBlock, enable: bool) {
@@ -803,7 +817,7 @@ impl<'d, M: Mode> Lpuart<'d, M> {
         let cts_pin = cts.map(|(p, af)| configure_pin(p, af, false));
 
         let regs = info.regs();
-        apply_config(regs, config)?;
+        apply_config(regs, &config)?;
         set_tx_enable(regs, has_tx);
         set_rx_enable(regs, has_rx);
 
@@ -868,6 +882,25 @@ impl<'d, M: Mode> Lpuart<'d, M> {
     ) -> Result<(), Error> {
         self.rx.blocking_read_dma(channel, buffer)
     }
+
+    /// Reconfigure the LPUART with new settings.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        let info = self.tx.info;
+        let regs = info.regs();
+        apply_config(regs, config)?;
+        Ok(())
+    }
+
+    /// Change the baud rate, keeping all other settings.
+    pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
+        self.tx.set_baudrate(baudrate)
+    }
+
+    /// Alias of [`Self::set_config`] kept for callers written against the
+    /// earlier owned-`set_config` / reference-`set_config_ref` pair.
+    pub fn set_config_ref(&mut self, config: &Config) -> Result<(), ConfigError> {
+        self.set_config(config)
+    }
 }
 
 impl<'d, M: Mode> LpuartTx<'d, M> {
@@ -901,6 +934,34 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
     pub fn busy(&self) -> bool {
         !tx_done(self.regs())
     }
+
+    /// Change the baud rate, keeping all other settings.
+    ///
+    /// Rewrites only the CR0 baud-divider fields behind the write handshake;
+    /// the active clock selector in `RCC.CR1` decides the base frequency.
+    pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
+        let regs = self.regs();
+        let freq = current_clock_source().frequency_hz();
+        let (ibaud, fbaud) = calc_baud(freq, baudrate).ok_or(ConfigError::Baudrate)?;
+        wait_cr0_writable(regs);
+        unsafe {
+            regs.cr0().modify(|_, w| {
+                w.lpuart_baud_rate_int().bits(ibaud as u16);
+                w.lpuart_baud_rate_fra().bits(fbaud as u8);
+                w
+            });
+        }
+        wait_cr0_writable(regs);
+        Ok(())
+    }
+
+    /// Reconfigure with new settings.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        apply_config(self.regs(), config)
+    }
+
+    // No `send_break`: the LPUART register block exposes no break-transmit
+    // bit in the PAC (unlike UART `LCR_H.BRK`), so there is nothing to drive.
 
     /// Blocking DMA write.
     pub fn blocking_write_dma(&mut self, channel: &mut DmaChannel<'_, Blocking>, buffer: &[u8]) -> Result<(), Error> {
@@ -996,6 +1057,11 @@ impl<'d> LpuartTx<'d, Async> {
 impl<'d, M: Mode> LpuartRx<'d, M> {
     fn regs(&self) -> &'static RegisterBlock {
         self.info.regs()
+    }
+
+    /// Reconfigure with new settings.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        apply_config(self.regs(), config)
     }
 
     /// Blocking read that fills the entire buffer.
@@ -1101,6 +1167,17 @@ impl<'d> LpuartRx<'d, Async> {
         };
         set_dma_req(regs, false, false);
         result
+    }
+}
+
+
+
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Lpuart<'d, M> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
     }
 }
 

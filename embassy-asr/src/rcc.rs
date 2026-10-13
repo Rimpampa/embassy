@@ -40,6 +40,7 @@ static PCLK1_HZ: AtomicU32 = AtomicU32::new(0);
 
 /// Oscillators controlled by RCC initialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Oscillator {
     /// Internal 48 MHz RC oscillator.
     Rco48m,
@@ -61,6 +62,7 @@ pub enum Oscillator {
 /// the vendor RCC API neither exposes PLL as a system-clock source nor
 /// specifies its frequency or setup sequence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum SystemClockSource {
     /// Internal 48 MHz RC oscillator divided by two.
@@ -107,6 +109,7 @@ impl SystemClockSource {
 
 /// HCLK divider.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum HclkDivider {
     /// Divide by 1.
@@ -141,6 +144,7 @@ impl HclkDivider {
 
 /// PCLK0 or PCLK1 divider.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum PclkDivider {
     /// Divide by 1.
@@ -166,6 +170,7 @@ impl PclkDivider {
 /// RCC initialization configuration.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// System clock source.
     pub system_clock: SystemClockSource,
@@ -206,6 +211,8 @@ impl Default for Config {
 
 /// Initialized core and bus clock frequencies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub struct Clocks {
     /// System clock frequency in hertz.
     pub sysclk_hz: u32,
@@ -233,6 +240,7 @@ impl Clocks {
 /// Hardware transition whose status did not become ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum WaitTarget {
     /// Internal 48 MHz RC oscillator.
     Rco48m,
@@ -247,6 +255,7 @@ pub enum WaitTarget {
 /// RCC configuration or peripheral-control error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// A bounded readiness wait expired.
     Timeout(WaitTarget),
@@ -255,6 +264,18 @@ pub enum Error {
     /// The vendor RCC does not provide a reset bit for this peripheral.
     ResetUnsupported(Peripheral),
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Timeout(_) => f.write_str("RCC readiness wait expired"),
+            Self::ClocksNotInitialized => f.write_str("RCC clocks are not initialized"),
+            Self::ResetUnsupported(_) => f.write_str("peripheral has no RCC reset bit"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 /// Return the frequencies published by successful RCC initialization.
 ///
@@ -501,6 +522,7 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
 /// RCC-controlled peripheral clock/reset identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Peripheral {
     Sac,
     Sec,

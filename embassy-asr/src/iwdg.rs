@@ -7,6 +7,27 @@ use crate::{Peri, pac, peripherals};
 
 const MAX_RELOAD: u32 = 0x0fff;
 
+/// IWDG configuration error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// Reload value exceeds the 12-bit `MAX` field (`0..=0x0FFF`).
+    InvalidReload,
+    /// Window value exceeds the 12-bit `WIN` field (`0..=0x0FFF`).
+    InvalidWindow,
+}
+
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidReload => f.write_str("IWDG reload out of range"),
+            Self::InvalidWindow => f.write_str("IWDG window out of range"),
+        }
+    }
+}
+
+impl core::error::Error for ConfigError {}
 /// IWDG clock prescaler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -66,16 +87,16 @@ impl<'d> IndependentWatchdog<'d> {
     /// Like `embassy-stm32`'s independent watchdog, construction starts
     /// watching: keep the handle alive (and keep petting) to avoid a reset.
     /// [`stop`](Self::stop) halts it; dropping the handle stops it as well.
-    pub fn new(peri: Peri<'d, peripherals::IWDG>, config: Config) -> Self {
+    pub fn new(peri: Peri<'d, peripherals::IWDG>, config: Config) -> Result<Self, ConfigError> {
         let _ = rcc::enable_peripheral(Peripheral::Iwdg);
         let this = Self { _peri: peri };
-        this.configure(config);
+        this.configure(config)?;
         this.start();
-        this
+        Ok(this)
     }
 
     /// Apply configuration while the watchdog is stopped.
-    pub fn configure(&self, config: Config) {
+    pub fn configure(&self, config: Config) -> Result<(), ConfigError> {
         let regs = Self::regs();
         wait_sr_done();
 
@@ -118,6 +139,7 @@ impl<'d> IndependentWatchdog<'d> {
             }
             wait_sr_done();
         }
+        Ok(())
     }
 
     /// Start the watchdog.
