@@ -215,6 +215,9 @@ fn lock(efc: &pac::Efc) {
 
 fn wait_done(efc: &pac::Efc) {
     while efc.sr().read().operation_done().bit_is_clear() {}
+    // Intentionally bit-identical write-back: clears every latched flag at
+    // once exactly like the vendor driver, instead of selecting flags that
+    // the PAC may model incompletely.
     let status = efc.sr().read().bits();
     unsafe {
         efc.sr().write_with_zero(|w| w.bits(status));

@@ -5,6 +5,8 @@
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
 
+/// CRC data register address for narrow volatile feeds (the PAC models only
+/// the whole-word accessor; sub-word writes need the raw address).
 const CRC_DR_ADDR: usize = 0x4002_2004;
 
 /// Polynomial width programmed into CRC_CR.

@@ -7,9 +7,12 @@
 //! update/CC interrupts, and typed alternate-function pins from the datasheet
 //! mux tables. Encoder, slave-mode, DMA burst, and OR remaps are omitted.
 //!
-//! Several multi-bit CR1/CCMR/SMCR/OR fields and the data registers lack PAC
-//! field accessors; those are programmed with the bit masks from
-//! `tremo_timer.h`.
+//! PAC field accessors exist for DIER, SR, EGR, CCER, CR1, CCMR1/2, CNT,
+//! PSC, ARR and CCRx and are used below. SR status clears stay raw by
+//! design: the flags are write-0-to-clear, so the vendor sequence writes
+//! ones everywhere except the cleared flags (`!mask`) — per-flag accessors
+//! cannot express that. IC-filter fields, SMCR, OR and CR2 have no PAC
+//! coverage and stay raw (masks from `tremo_timer.h`).
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
@@ -72,9 +75,13 @@ impl core::error::Error for ConfigError {}
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum Channel {
+    /// Capture/compare channel 0.
     Ch0 = 0,
+    /// Capture/compare channel 1.
     Ch1 = 1,
+    /// Capture/compare channel 2.
     Ch2 = 2,
+    /// Capture/compare channel 3.
     Ch3 = 3,
 }
 
@@ -135,8 +142,11 @@ impl TimerChannel for Ch3 {
 #[repr(u32)]
 #[non_exhaustive]
 pub enum ClockDivision {
+    /// No prescaling.
     Div1 = 0x0,
+    /// Divide the timer clock by 2.
     Div2 = 0x100,
+    /// Divide the timer clock by 4.
     Div4 = 0x200,
 }
 
@@ -165,8 +175,11 @@ pub enum OutputPolarity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum CapturePolarity {
+    /// Capture on  rising edge.
     Rising,
+    /// Capture on  falling edge.
     Falling,
+    /// Capture on a both edges.
     Both,
 }
 
@@ -176,25 +189,36 @@ pub enum CapturePolarity {
 pub struct InterruptFlags(u32);
 
 impl InterruptFlags {
+    /// Counter overflow/underflow update event.
     pub const UPDATE: Self = Self(1 << 0);
+    /// Capture/compare channel 0 event.
     pub const CC0: Self = Self(1 << 1);
+    /// Capture/compare channel 1 event.
     pub const CC1: Self = Self(1 << 2);
+    /// Capture/compare channel 2 event.
     pub const CC2: Self = Self(1 << 3);
+    /// Capture/compare channel 3 event.
     pub const CC3: Self = Self(1 << 4);
+    /// Trigger input event.
     pub const TRIGGER: Self = Self(1 << 6);
 
+    /// Empty flag set.
     pub const fn empty() -> Self {
         Self(0)
     }
 
+    /// Combine flag sets.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// Raw flag bits.
     pub const fn bits(self) -> u32 {
         self.0 & SR_IT_MASK
     }
 
+    /// Whether every bit in `other` is present.
+    /// Whether every bit in `other` is present.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
@@ -337,12 +361,16 @@ pub struct InterruptHandler<T: Instance> {
 impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
         let regs = T::regs();
-        let pending = regs.sr().read().bits() & regs.dier().read().bits() & SR_IT_MASK;
+        let sr = regs.sr().read().bits();
+        let dier = regs.dier().read().bits();
+        let pending = sr & dier & SR_IT_MASK;
         if pending == 0 {
             return;
         }
 
         // Vendor `timer_clear_status`: write zeros to the flags being cleared.
+        // SR has field accessors (uif, cc0if, etc.) but we clear by raw mask
+        // to match the vendor `timer_clear_status` sequence.
         unsafe {
             regs.sr().write_with_zero(|w| w.bits(!pending));
         }
@@ -414,6 +442,8 @@ fn set_interrupt_enabled<T: Instance>(flags: InterruptFlags, enabled: bool) {
 
 fn clear_interrupt<T: Instance>(flags: InterruptFlags) {
     let mask = flags.bits();
+    // SR has field accessors (uif, cc0if, etc.) but we clear by raw mask
+    // to match the vendor `timer_clear_status` sequence.
     unsafe {
         T::regs().sr().write_with_zero(|w| w.bits(!mask));
     }

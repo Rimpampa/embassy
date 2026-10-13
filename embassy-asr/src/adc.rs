@@ -2,7 +2,7 @@
 //!
 //! Register programming follows the vendor `tremo_adc` driver and the SDK
 //! `adc/single_mode` / `adc/continue_mode` examples. Analog power-up and
-//! reference selection use the AFEC analog window via [`crate::afec::analog`].
+//! reference selection use the AFEC analog window (see `afec` module).
 //!
 //! # Documented external channels
 //!

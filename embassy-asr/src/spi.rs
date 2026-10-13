@@ -33,6 +33,7 @@ use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
 // PL022 / tremo_spi register layout is fully described by the PAC field
 // accessors used below; no hand-written bit positions remain in this driver.
+
 const RESULT_OK: u8 = 0;
 const RESULT_OVERRUN: u8 = 1;
 
