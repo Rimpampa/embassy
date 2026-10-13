@@ -17,18 +17,11 @@
 Enable the `time-driver-lptim0` feature (default) to use LPTIM0 as Embassy's
 monotonic clock. `time-driver-rtc` is deprecated but kept for compatibility.
 
-The driver:
-
-- requires a working 32.768 kHz crystal on XO32K (same always-on domain as RTC);
-- resets LPTIM0, selects XO32K in `RCC.CR1` (`lptimer0_clk_sel`), sets
-  `ARR=0xFFFF`, enables `ARRM` for 16-to-64 bit extension and `CMPM` for alarms
-  during `embassy_asr::init(Config::default())`;
-- owns LPTIM0 exclusively, so application code must not access LPTIM0 through the
-  raw PAC;
-- free-runs at 32,768 Hz (2 s per overflow), defers far-future compares beyond
-  0xC000 ticks to `next_period()` like `embassy-stm32/src/time_driver/lptim.rs`;
-- supports one global Embassy time driver; and
-- enables the `LPTIMER0` interrupt at NVIC priority 2.
+The driver requires a working 32.768 kHz crystal on XO32K (same always-on
+domain as RTC), owns LPTIM0 exclusively (application code must not access
+LPTIM0 through the raw PAC), and enables the `LPTIMER0` interrupt at NVIC
+priority 2. Register-level behavior (ARR, overflow extension, compare
+deferral) is documented in `src/time_driver.rs` rather than duplicated here.
 
 Register programming follows vendor `tremo_lptimer` / `tremo_rcc` and the SDK
 `lptimer_wakeup_stop` example. PAC is the official `asr6601-pac` 0.1.0 from

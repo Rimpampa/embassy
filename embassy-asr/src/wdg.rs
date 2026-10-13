@@ -1,6 +1,10 @@
 //! Window / system watchdog (ARM SP805-style WDG block).
 //!
 //! Register programming follows the vendor `tremo_wdg` driver.
+//!
+//! PAC field accessors are used for LOAD, VALUE and CONTROL below.
+//! LOCK (magic-word write), INTCLR (any-write-clears) and RIS/MIS have no
+//! PAC fields and stay raw, matching the vendor header and SP805 behavior.
 
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
@@ -22,8 +26,10 @@ impl<'d> Watchdog<'d> {
         Self { _peri: peri }
     }
 
-    /// Start the watchdog with the given reload value.
+    /// Start the watchdog with the given reload value (raw counter ticks).
     ///
+    /// The tick rate is the WDG block clock; there is no published divider to
+    /// convert wall time, so callers tune this against the vendor example.
     /// Per the vendor driver, the first timeout asserts the WDG interrupt and
     /// reloads the counter; a second timeout without a feed resets the system.
     pub fn start(&mut self, reload_value: u32) {
@@ -47,9 +53,7 @@ impl<'d> Watchdog<'d> {
     /// Feed the watchdog and clear its interrupt.
     pub fn pet(&mut self) {
         unlock();
-        unsafe {
-            Self::regs().intclr().write_with_zero(|w| w.bits(1));
-        }
+        unsafe { Self::regs().intclr().write_with_zero(|w| w.bits(1)) };
         lock();
     }
 

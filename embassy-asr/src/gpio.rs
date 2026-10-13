@@ -22,10 +22,21 @@ use crate::{pac, peripherals};
 const PORT_COUNT: usize = 4;
 const PINS_PER_PORT: usize = 16;
 const PIN_COUNT: usize = PORT_COUNT * PINS_PER_PORT;
+/// Base address of the GPIO bank array, taken from the PAC so the memory map
+/// is not re-encoded here.
+///
+/// All four ports share the `gpioa::RegisterBlock` layout for every register
+/// this driver touches: the PAC aliases port B/C onto it
+/// (`pub use gpioa as gpiob/gpioc`), and port D differs only in `AFRH`
+/// (3-bit fields for pins 8–15, handled by the AFR width special-case).
+/// The PAC `int_cr` per-pin fields were verified against Reference Manual
+/// §11 (interleaved `POS@2n`/`NEG@2n+1`); the bank-wide fields below stay
+/// mask-addressed, which is inherent to banked GPIO on any HAL.
 #[inline]
 fn gpio_base() -> usize {
     pac::Gpioa::PTR as usize
 }
+/// Port stride in the GPIO bank array.
 const GPIO_PORT_STRIDE: usize = 0x400;
 
 const INTERRUPT_NONE: u32 = 0;

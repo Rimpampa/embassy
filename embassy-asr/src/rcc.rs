@@ -15,6 +15,9 @@ const XO24M_HZ: u32 = 24_000_000;
 const XO32M_HZ: u32 = 32_000_000;
 const LOW_SPEED_HZ: u32 = 32_768;
 
+/// PAC gaps kept as named constants: the analog-window registers live outside
+/// the PAC RCC block. (The PAC LORAC `*_bat` view covers the XO32M/reset
+/// fields and is used below.)
 const ANALOG_RCO32K_POWER_DOWN: u32 = 1 << 15;
 const ANALOG_XO32K_POWER_DOWN: u32 = (1 << 13) | (1 << 14);
 const ANALOG_XO24M_ENABLE: u32 = 1 << 3;
@@ -34,6 +37,11 @@ const ASYNC_RESET_DELAY_US: u64 = 92;
 
 static CLOCKS_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SYSCLK_HZ: AtomicU32 = AtomicU32::new(0);
+/// Readiness-poll budget published by the last [`init`] call.
+///
+/// Peripheral enable/disable/reset paths run outside `init` (including in
+/// `Drop`), so they read the budget here instead of `Config::new()`: a board
+/// that tunes `readiness_poll_limit` gets the same budget everywhere.
 static POLL_LIMIT: AtomicU32 = AtomicU32::new(1_000_000);
 static HCLK_HZ: AtomicU32 = AtomicU32::new(0);
 static PCLK0_HZ: AtomicU32 = AtomicU32::new(0);
@@ -484,10 +492,7 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
             Ok(())
         }
         Oscillator::Xo24m => {
-            REG_06.modify(
-                ANALOG_XO24M_ENABLE | ANALOG_XO24M_POWER_DOWN,
-                ANALOG_XO24M_ENABLE,
-            );
+            REG_06.modify(ANALOG_XO24M_ENABLE | ANALOG_XO24M_POWER_DOWN, ANALOG_XO24M_ENABLE);
             Ok(())
         }
         Oscillator::Xo32m => {
@@ -526,46 +531,87 @@ fn enable_oscillator(oscillator: Oscillator, xo32m_uses_tcxo: bool, poll_limit: 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Peripheral {
+    /// Smart access controller.
     Sac,
+    /// Security engine.
     Sec,
+    /// CRC engine.
     Crc,
+    /// Real-time clock.
     Rtc,
+    /// Window watchdog.
     Wdg,
+    /// Independent watchdog.
     Iwdg,
+    /// Low-power timer 0.
     Lptimer0,
+    /// Basic timer 1.
     Bstimer1,
+    /// Basic timer 0.
     Bstimer0,
+    /// General-purpose timer 3.
     Timer3,
+    /// General-purpose timer 2.
     Timer2,
+    /// General-purpose timer 1.
     Timer1,
+    /// General-purpose timer 0.
     Timer0,
+    /// GPIO port A.
     GpioA,
+    /// GPIO port B.
     GpioB,
+    /// GPIO port C.
     GpioC,
+    /// GPIO port D.
     GpioD,
+    /// LoRa controller.
     Lora,
+    /// DAC controller.
     Dac,
+    /// LCD controller.
     Lcd,
+    /// Analog front-end controller.
     Afec,
+    /// ADC controller.
     Adc,
+    /// I2C bus 2.
     I2c2,
+    /// I2C bus 1.
     I2c1,
+    /// I2C bus 0.
     I2c0,
+    /// Quad-SPI controller.
     Qspi,
+    /// Synchronous serial port 2.
     Ssp2,
+    /// Synchronous serial port 1.
     Ssp1,
+    /// Synchronous serial port 0.
     Ssp0,
+    /// Low-power UART.
     Lpuart,
+    /// UART3.
     Uart3,
+    /// UART2.
     Uart2,
+    /// UART1.
     Uart1,
+    /// UART0.
     Uart0,
+    /// DMA controller 1.
     Dma1,
+    /// DMA controller 0.
     Dma0,
+    /// I2S controller.
     I2s,
+    /// Random number generator.
     Rng,
+    /// Low-power timer 1.
     Lptimer1,
+    /// System configuration controller.
     Syscfg,
+    /// Power controller.
     Pwr,
 }
 
@@ -593,6 +639,12 @@ fn modify_clock_register(register: ClockRegister, mask: u32, enable: bool) {
     });
 }
 
+/// Gate one basic-domain peripheral clock.
+///
+/// GPIOA..D gates are the PAC `IOM0..3_CLK_EN` fields (GpioA is IOM0, …,
+/// GpioD is IOM3 — the GPIO ports double as I/O-matrix instances).
+/// Dual-domain peripherals (RTC/IWDG/LPTIMER/LCD/LPUART) are not handled
+/// here — see `set_peripheral_clock_raw`.
 fn set_basic_clock_gate(peripheral: Peripheral, enable: bool) {
     critical_section::with(|_| {
         let rcc = rcc();
@@ -728,6 +780,11 @@ fn reset_needs_release_delay(peripheral: Peripheral) -> bool {
     )
 }
 
+/// Assert or release one peripheral's active-low reset line.
+///
+/// Every peripheral except Syscfg/Pwr has a generated reset accessor (GPIO
+/// ports share `IOM_RST_N`); Syscfg/Pwr have no reset at all
+/// (`Error::ResetUnsupported`).
 fn set_reset_line(peripheral: Peripheral, asserted: bool) -> Result<(), Error> {
     // Active-low: asserting clears the bit.
     if matches!(peripheral, Peripheral::Syscfg | Peripheral::Pwr) {

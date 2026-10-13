@@ -22,6 +22,7 @@ const PROTECT_SEQ1: u32 = 0x1314_1516;
 /// Flash driver error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Address is outside the main flash array or misaligned.
     Address,
@@ -30,6 +31,18 @@ pub enum Error {
     /// Flash security policy rejected the operation.
     Security,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Address => f.write_str("flash address out of range or misaligned"),
+            Self::Length => f.write_str("invalid flash operation length"),
+            Self::Security => f.write_str("flash operation rejected by security policy"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
 
 impl NorFlashError for Error {
     fn kind(&self) -> NorFlashErrorKind {
@@ -202,6 +215,9 @@ fn lock(efc: &pac::Efc) {
 
 fn wait_done(efc: &pac::Efc) {
     while efc.sr().read().operation_done().bit_is_clear() {}
+    // Intentionally bit-identical write-back: clears every latched flag at
+    // once exactly like the vendor driver, instead of selecting flags that
+    // the PAC may model incompletely.
     let status = efc.sr().read().bits();
     unsafe {
         efc.sr().write_with_zero(|w| w.bits(status));

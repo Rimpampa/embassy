@@ -12,6 +12,15 @@ build = [
     { target = "thumbv7em-none-eabihf", features = ["asr6601", "time-driver-lptim0"] },
 ]
 
+[package.metadata.embassy_docs]
+src_base = "https://github.com/Rimpampa/embassy/blob/dev/embassy-asr/src/"
+src_base_git = "https://github.com/Rimpampa/embassy/blob/$COMMIT/embassy-asr/src/"
+
+features = ["defmt", "asr6601", "time-driver-lptim0"]
+flavors = [
+    { regex_feature = "asr6601", target = "thumbv7em-none-eabihf" },
+]
+
 [package.metadata.docs.rs]
 features = ["asr6601", "time-driver-lptim0"]
 rustdoc-args = ["--cfg", "docsrs"]

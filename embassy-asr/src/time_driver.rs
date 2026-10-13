@@ -55,6 +55,12 @@ const POLL_LIMIT: u32 = 1_000_000;
 // `embassy-stm32/src/time_driver/lptim.rs`).
 const COMPARE_THRESHOLD: u64 = 0xc000;
 
+// Note: a compare value only a few ticks ahead of the running counter is
+// missed for the current 2 s cycle on this silicon (the new value is not
+// evaluated until the next overflow); such an alarm then fires up to one full
+// period late. Keep short (sub-millisecond) deadlines in mind when using this
+// driver.
+
 struct LptimTimeDriver {
     initialized: AtomicBool,
     period: AtomicU32,
@@ -74,6 +80,7 @@ fn lptim() -> pac::Lptim0 {
 }
 
 fn wait_isr(mask: u32) {
+    // The mask form stays to match the vendor polling sequence bit-for-bit.
     for _ in 0..POLL_LIMIT {
         if lptim().isr().read().bits() & mask == mask {
             return;
@@ -82,6 +89,10 @@ fn wait_isr(mask: u32) {
     }
 }
 
+// CSR acknowledge for ARRM/CMPM, per the vendor wakeup example. Bounded so a
+// wedged timer cannot hang the caller (or the time-driver ISR) forever; the
+// normal path answers in a few cycles. The mask form matches the vendor
+// wakeup example sequence.
 fn wait_csr(mask: u32) {
     for _ in 0..POLL_LIMIT {
         if lptim().csr().read().bits() & mask == mask {
@@ -109,13 +120,24 @@ impl LptimTimeDriver {
         // `rcc_set_lptimer0_clk_source`). New PAC has proper variants.
         critical_section::with(|_| {
             // Gate functional clock and wait for sync clear if needed.
-            let sync = || unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set();
+            let sync = || {
+                unsafe { pac::Rcc::steal() }
+                    .sr1()
+                    .read()
+                    .lptim0_clk_en_sync()
+                    .bit_is_set()
+            };
             if sync() {
                 unsafe { pac::Rcc::steal() }
                     .cgr1()
                     .modify(|_, w| w.lptim0_clk_en().clear_bit());
                 for _ in 0..POLL_LIMIT {
-                    if !unsafe { pac::Rcc::steal() }.sr1().read().lptim0_clk_en_sync().bit_is_set() {
+                    if !unsafe { pac::Rcc::steal() }
+                        .sr1()
+                        .read()
+                        .lptim0_clk_en_sync()
+                        .bit_is_set()
+                    {
                         break;
                     }
                     core::hint::spin_loop();
@@ -151,9 +173,9 @@ impl LptimTimeDriver {
         });
         wait_isr(ISR_CFGROK);
         // PRESC /1 is missing in PAC/SVD; program raw bits from tremo_lptimer.h.
-        lptim().cfgr().modify(|r, w| unsafe {
-            w.bits((r.bits() & !CFGR_PRESC_MASK) | 0x0)
-        });
+        lptim()
+            .cfgr()
+            .modify(|r, w| unsafe { w.bits((r.bits() & !CFGR_PRESC_MASK) | 0x0) });
         wait_isr(ISR_CFGROK);
 
         // Enable peripheral.
@@ -182,6 +204,7 @@ impl LptimTimeDriver {
         lptim().ier().modify(|_, w| w.arrmie().set_bit());
 
         // Start continuous counting (CNTSTRT missing in PAC; raw from header).
+        // CR has field accessors but CNTSTRT is missing; use raw bits.
         lptim().cr().modify(|r, w| unsafe { w.bits(r.bits() | CR_CNTSTRT) });
         wait_isr(ISR_CROK);
 

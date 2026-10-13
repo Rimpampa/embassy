@@ -3,8 +3,8 @@
 //! The PAC describes the digital AFEC registers at `0x4000_8200`. The vendor
 //! SDK also accesses an analog register window starting at `0x4000_8000`,
 //! where register index `n` is located at byte offset `n * 4`. That window is
-//! not present in the current SVD, so its volatile accesses are kept in the
-//! crate-private [`analog`] module below.
+//! not present in the current SVD, so its volatile accesses are kept in a
+//! crate-private `analog` module below.
 //!
 //! The SDK publishes bit assignments for three raw status signals. It does not
 //! publish bit assignments or write semantics for `CR` or `INT_SR`; therefore
@@ -15,6 +15,7 @@ use crate::{Peri, pac, peripherals};
 
 /// Snapshot of the documented AFEC raw status signals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct RawStatus {
     rco24m_ready: bool,
     pll_unlocked: bool,
@@ -51,6 +52,7 @@ impl RawStatus {
 /// Consequently, the value can be inspected, but this driver does not provide
 /// field accessors or a way to write it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct InterruptStatus(u32);
 
 impl InterruptStatus {

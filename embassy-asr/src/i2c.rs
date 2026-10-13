@@ -1,8 +1,24 @@
 //! I2C0–I2C2 driver for the ASR6601 (Marvell-style TWSI).
 //!
 //! Register programming follows the vendor `tremo_i2c` driver and the I2C
-//! examples under `projects/*/examples/i2c`. Transfers use the non-FIFO
-//! byte path (`DBR` + `CR.TRANS_BYTE`), which is the SDK default.
+//! examples under `projects/*/examples/i2c`. All modes use the non-FIFO byte
+//! path (`DBR` + `CR.TRANS_BYTE`), which is the SDK default. Async master
+//! waits per byte on `IDBR_EMPTY` / `DBR_FULL` interrupts and sleeps (WFE)
+//! between them; blocking master and both slave modes poll the same flags
+//! with a bounded poll budget (`BLOCKING_POLL_LIMIT`) so a wedged bus fails
+//! with [`Error::Timeout`] instead of spinning forever.
+//!
+//! The FIFO engine (`WFIFO`/`RFIFO` + `CR.TRANS_BEGIN` + `SR.TRANS_DONE`) is
+//! deliberately not used, although it would cut IRQ wakes to ~one per
+//! transaction. Plausible chip quirk, observed on hardware: in FIFO mode a
+//! slave NACK does not reliably set `BED`, and the engine can then halt with
+//! entries stranded in the WFIFO, `UNIT_BUSY` latched and `TRANS_DONE` never
+//! coming — a state no flag combination resolves except a full bus recovery.
+//! The byte path reports the same event promptly via `BED`/`ACK_STATUS` and
+//! leaves no engine state behind, so subsequent transactions start clean by
+//! construction. DMA is not used either (RM §15.8/15.12): it only replaces
+//! the FIFO feed mechanism while the NACK handling stays identical, so it
+//! cannot help here.
 //!
 //! Alternate-function numbers come from datasheet Table 4-3 (Fun=3 for every
 //! documented I2C remap). Constructors either take typed pins that encode that
@@ -24,7 +40,6 @@ use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal::i2c::Operation as EhOperation;
-
 pub use embedded_hal::i2c::Operation;
 
 use crate::gpio::{AlternateFunction, Flex, Pin as GpioPin, Pull};
@@ -34,19 +49,32 @@ use crate::pac::i2c0::RegisterBlock;
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, PeripheralType, interrupt, peripherals};
 
+/// Interrupt enables used by the driver, mirroring `CR` bits 18–27.
+///
+/// Passed by value so each wait arms exactly what it needs; the ISR clears
+/// all of them. Positions live in the PAC field accessors, not here.
 #[derive(Clone, Copy, Default)]
 struct IrqEnables {
+    /// Arbitration-loss detection.
     arb_loss: bool,
+    /// `IDBR` transmit-empty (byte done).
     tx_empty: bool,
+    /// `DBR` receive-full (byte ready).
     rx_full: bool,
+    /// Bus error.
     bus_error: bool,
+    /// Slave address match.
     slave_addr: bool,
+    /// Slave stop detected.
     slave_stop: bool,
+    /// Master stop detection interrupt.
     master_stop: bool,
+    /// FIFO transaction done.
     trans_done: bool,
 }
 
 impl IrqEnables {
+    /// Error enables armed by every wait.
     const fn errors() -> Self {
         Self {
             arb_loss: true,
@@ -61,13 +89,35 @@ impl IrqEnables {
     }
 }
 
+/// `SR` bit 17 (`RW_MODE`): set when the matched address had the R/W bit set
+/// (master read / slave transmit). The PAC skips this bit — and still does in
+/// 0.1.1, because the RM marks it reserved — so its position stays a named
+/// constant; everything else is a field accessor.
+///
+/// Direction is only observable from the slave side, and no P4E1 wiring
+/// exposes a second I2C pair for a single-board master/slave loopback (I2C0
+/// is shorted, I2C1 pins are consumed by SWD/SPI-flash/HLK), so this bit is
+/// a documented assumption until a two-board slave test proves it.
 const SR_RW_MODE: u32 = 1 << 17;
 
+/// Bounded poll budget for the blocking master waits below.
+///
+/// A byte at 100 kHz takes ~90 us (~2k HCLK cycles); this budget is ~1000x
+/// that, so healthy transfers always complete while a wedged bus (SCL held
+/// low, no error flags) fails fast with [`Error::Timeout`] instead of
+/// spinning forever inside an executor task.
 const BLOCKING_POLL_LIMIT: u32 = 1_000_000;
 
 /// I2C transfer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+/// I2C driver error.
+///
+/// Deliberately a single type rather than an `Error`/`ConfigError` split:
+/// `AddressMode` is validated per transfer (the address is a per-operation
+/// parameter, not construction config) and `Timeout` spans both init
+/// handshakes and transfer waits, so a split would duplicate those variants
+/// in both enums for no checking benefit.
 #[non_exhaustive]
 pub enum Error {
     /// ACK was not received for an address or data byte.
@@ -304,6 +354,9 @@ fn unit_reset(regs: &RegisterBlock) -> Result<(), Error> {
     }
 
     // Vendor: CR = UNIT_RESET only, pulse reset, clear SR, clear reset bit.
+    // The SR step writes the snapshot back verbatim (clearing every latched
+    // flag at once, exactly like the vendor `i2cx->SR = i2cx->SR`); keep it
+    // bit-identical rather than clearing flags one by one.
     unsafe {
         regs.cr().write_with_zero(|w| w.unit_reset().set_bit());
         let sr = regs.sr().read().bits();
@@ -342,36 +395,43 @@ fn enable_unit(regs: &RegisterBlock, enable: bool) {
     });
 }
 
+/// Clear one latched `SR` event flag (write-1-to-clear). One helper per flag
+/// so a wrong-position clear is a compile error, not a silent mis-clear.
 fn clear_arb_loss(regs: &RegisterBlock) {
     unsafe {
         regs.sr().write_with_zero(|w| w.arb_loss_det().set_bit());
     }
 }
 
+/// Clear the latched bus-error flag.
 fn clear_bus_error(regs: &RegisterBlock) {
     unsafe {
         regs.sr().write_with_zero(|w| w.bus_error().set_bit());
     }
 }
 
+/// Clear the latched transmit-empty flag.
 fn clear_tx_empty(regs: &RegisterBlock) {
     unsafe {
         regs.sr().write_with_zero(|w| w.idbr_empty().set_bit());
     }
 }
 
+/// Clear the latched receive-full flag.
 fn clear_rx_full(regs: &RegisterBlock) {
     unsafe {
         regs.sr().write_with_zero(|w| w.dbr_full().set_bit());
     }
 }
 
+/// Clear the latched slave-address-detect flag.
 fn clear_slave_addr(regs: &RegisterBlock) {
     unsafe {
         regs.sr().write_with_zero(|w| w.slave_addr_det().set_bit());
     }
 }
 
+/// Clear the latched slave-stop-detect flag.
 fn clear_slave_stop(regs: &RegisterBlock) {
     unsafe {
         regs.sr().write_with_zero(|w| w.slave_stop_det().set_bit());
@@ -843,6 +903,11 @@ impl<'d> I2c<'d, Async> {
     }
 
     /// Attempt to recover a jammed bus.
+    ///
+    /// This is synchronous bit-banging (GPIO remux + `asm::delay` clocks, up
+    /// to milliseconds) on an async method: recovery is inherently a
+    /// blocking bus procedure with no interrupt to wait on, and it runs
+    /// rarely (only after a wedged transfer). Do not call it in a hot path.
     ///
     /// A slave stuck mid-byte holds SDA Low, so the TWSI unit can never
     /// generate a START and every transfer hangs. If SDA is observed Low the
@@ -1440,8 +1505,10 @@ impl<'d, M: Mode> embedded_hal_02::blocking::i2c::Read for I2c<'d, M> {
         self.blocking_read(address, buffer)
     }
 }
+
 impl<'d, M: Mode> embedded_hal_02::blocking::i2c::Write for I2c<'d, M> {
     type Error = Error;
+
     fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
         self.blocking_write(address, bytes)
     }
@@ -1473,8 +1540,6 @@ impl<'d, M: Mode> embedded_hal_02::blocking::i2c::Transactional for I2c<'d, M> {
         Ok(())
     }
 }
-
-
 
 // --- Instance / pins -------------------------------------------------------
 

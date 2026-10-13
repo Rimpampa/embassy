@@ -78,7 +78,7 @@ impl<'d> Rng<'d> {
     }
 
     /// Apply configuration and enable generation.
-    pub fn configure(&self, config: Config) {
+    pub fn configure(&mut self, config: Config) {
         let regs = Self::regs();
         unsafe {
             regs.rngclk().write_with_zero(|w| {

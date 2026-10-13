@@ -412,6 +412,7 @@ fn read_sr0(regs: &RegisterBlock) -> pac::lpuart::sr0::R {
     regs.sr0().read()
 }
 
+/// Clear latched SR0 receive-error flags (write-1-to-clear per flag).
 fn clear_sr0_errors(regs: &RegisterBlock, sr0: &pac::lpuart::sr0::R) {
     wait_cr0_writable(regs);
     let start_invalid = sr0.start_invalid_state().bit_is_set();
@@ -429,6 +430,8 @@ fn clear_sr0_errors(regs: &RegisterBlock, sr0: &pac::lpuart::sr0::R) {
     wait_cr0_writable(regs);
 }
 
+/// Enable or disable the receive interrupt group (RX-done, invalid start,
+/// parity/stop errors, overflow, RX-not-empty).
 fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
     regs.cr1().modify(|_, w| {
         w.rx_done_int().bit(enable);
@@ -440,6 +443,7 @@ fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
     });
 }
 
+/// Enable or disable the transmit interrupt group (TX-empty, TX-done).
 fn set_tx_interrupts(regs: &RegisterBlock, enable: bool) {
     regs.cr1().modify(|_, w| {
         w.tx_empty_int().bit(enable);
@@ -447,10 +451,12 @@ fn set_tx_interrupts(regs: &RegisterBlock, enable: bool) {
     });
 }
 
+/// Enable or disable the TX-empty interrupt alone.
 fn set_tx_empty_interrupt(regs: &RegisterBlock, enable: bool) {
     regs.cr1().modify(|_, w| w.tx_empty_int().bit(enable));
 }
 
+/// Enable or disable the TX-done interrupt alone.
 fn set_tx_done_interrupt(regs: &RegisterBlock, enable: bool) {
     regs.cr1().modify(|_, w| w.tx_done_int().bit(enable));
 }
@@ -848,6 +854,12 @@ impl<'d, M: Mode> Lpuart<'d, M> {
     }
 
     /// Reborrow as independent TX and RX drivers.
+    ///
+    /// Deliberately `&mut` borrows rather than the guideline's owned-halves
+    /// form: the two halves share one peripheral closed over by a shutdown
+    /// refcount (see the `Drop` impls below), so owned `split_ref` halves
+    /// would run `Drop` on scope exit and shut the peripheral down while the
+    /// driver is still alive.
     pub fn split_ref(&mut self) -> (&mut LpuartTx<'d, M>, &mut LpuartRx<'d, M>) {
         (&mut self.tx, &mut self.rx)
     }

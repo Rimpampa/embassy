@@ -18,7 +18,7 @@
 use core::cell::UnsafeCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering, compiler_fence};
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering, compiler_fence};
 use core::task::Poll;
 
 use embassy_hal_internal::drop::OnDrop;
@@ -784,6 +784,12 @@ impl<'d, M: Mode> Uart<'d, M> {
     }
 
     /// Reborrow as independent TX and RX drivers.
+    ///
+    /// Deliberately `&mut` borrows rather than the guideline's owned-halves
+    /// form: the two halves share one peripheral closed over by a shutdown
+    /// refcount (see the `Drop` impls below), so owned `split_ref` halves
+    /// would run `Drop` on scope exit and shut the peripheral down while the
+    /// driver is still alive.
     pub fn split_ref(&mut self) -> (&mut UartTx<'d, M>, &mut UartRx<'d, M>) {
         (&mut self.tx, &mut self.rx)
     }
@@ -1087,15 +1093,13 @@ impl<'d> UartRx<'d, Async> {
     async fn wait_rx_ready(&mut self) {
         let info = self.info;
         poll_fn(|cx| {
-            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire)
-            {
+            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire) {
                 return Poll::Ready(());
             }
             info.state.rx_waker.register(cx.waker());
             // Make sure the RX interrupt is armed so the ISR keeps capturing.
             set_rx_interrupts(info.regs(), true);
-            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire)
-            {
+            if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire) {
                 return Poll::Ready(());
             }
             Poll::Pending
@@ -1113,7 +1117,9 @@ impl<'d> UartRx<'d, Async> {
             return Ok(None);
         }
         let b = unsafe { *(&raw const (*info.state.rx_buf.get())[tail]) };
-        info.state.rx_tail.store(((tail + 1) % RX_BUF_CAP) as u16, Ordering::Release);
+        info.state
+            .rx_tail
+            .store(((tail + 1) % RX_BUF_CAP) as u16, Ordering::Release);
         Ok(Some(b))
     }
 
