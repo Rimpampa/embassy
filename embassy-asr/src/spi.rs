@@ -1041,10 +1041,15 @@ impl<'d, M: Mode> Drop for Spi<'d, M> {
         self.set_enabled(false);
         unsafe {
             let regs = &*self.info.regs;
-            regs.imsc().write_with_zero(|w| w.bits(0));
-            regs.dmacr().write_with_zero(|w| w.bits(0));
-            regs.icr().write_with_zero(|w| w.bits(INT_ROR | INT_RT));
+            regs.imsc().write_with_zero(|w| w);
+            regs.dmacr().modify(|_, w| w.txdmae().clear_bit().rxdmae().clear_bit());
+            regs.icr().write_with_zero(|w| {
+                w.roric().set_bit();
+                w.rtic().set_bit()
+            });
         }
+        // Disabling an already-disabled vector is idempotent, so this is
+        // harmless for `Blocking` instances that never enabled it.
         self.info.interrupt.disable();
     }
 }
