@@ -99,14 +99,25 @@ impl<'d> IndependentWatchdog<'d> {
     /// [`stop`](Self::stop) halts it; dropping the handle stops it as well.
     pub fn new(peri: Peri<'d, peripherals::IWDG>, config: Config) -> Result<Self, ConfigError> {
         let _ = rcc::enable_peripheral(Peripheral::Iwdg);
-        let this = Self { _peri: peri };
+        let mut this = Self { _peri: peri };
         this.configure(config)?;
         this.start();
         Ok(this)
     }
 
     /// Apply configuration while the watchdog is stopped.
-    pub fn configure(&self, config: Config) -> Result<(), ConfigError> {
+    ///
+    /// Rejects reload/window values outside the 12-bit fields instead of
+    /// silently clamping: a clamped timeout would fire later than requested.
+    pub fn configure(&mut self, config: Config) -> Result<(), ConfigError> {
+        if config.reload > MAX_RELOAD {
+            return Err(ConfigError::InvalidReload);
+        }
+        if let Some(window) = config.window {
+            if window > MAX_RELOAD {
+                return Err(ConfigError::InvalidWindow);
+            }
+        }
         let regs = Self::regs();
         wait_sr_done();
 
@@ -137,15 +148,14 @@ impl<'d> IndependentWatchdog<'d> {
         });
         wait_sr_done();
 
-        let reload = config.reload.min(MAX_RELOAD);
         unsafe {
-            regs.max().write_with_zero(|w| w.bits(reload));
+            regs.max().write_with_zero(|w| w.bits(config.reload));
         }
         wait_sr_done();
 
         if let Some(window) = config.window {
             unsafe {
-                regs.win().write_with_zero(|w| w.bits(window.min(MAX_RELOAD)));
+                regs.win().write_with_zero(|w| w.bits(window));
             }
             wait_sr_done();
         }
@@ -153,7 +163,7 @@ impl<'d> IndependentWatchdog<'d> {
     }
 
     /// Start the watchdog.
-    pub fn start(&self) {
+    pub fn start(&mut self) {
         wait_sr_done();
         Self::regs().cr().modify(|_, w| {
             w.start().set_bit();
@@ -170,7 +180,7 @@ impl<'d> IndependentWatchdog<'d> {
     }
 
     /// Feed the watchdog.
-    pub fn pet(&self) {
+    pub fn pet(&mut self) {
         let regs = Self::regs();
         if regs.sr2().read().reset_req_sr().bit_is_set() {
             wait_sr_done();
@@ -187,12 +197,12 @@ impl<'d> IndependentWatchdog<'d> {
     }
 
     /// Enable or disable the reset-request interrupt.
-    pub fn set_interrupt_enabled(&self, enabled: bool) {
+    pub fn set_interrupt_enabled(&mut self, enabled: bool) {
         Self::regs().cr1().modify(|_, w| w.reset_req_int_en().bit(enabled));
     }
 
     /// Clear the reset-request interrupt status.
-    pub fn clear_interrupt(&self) {
+    pub fn clear_interrupt(&mut self) {
         unsafe {
             Self::regs().sr2().write_with_zero(|w| w.reset_req_sr().set_bit());
         }
@@ -206,6 +216,10 @@ impl<'d> IndependentWatchdog<'d> {
 }
 
 fn wait_sr_done() {
+    // Fail-stop init handshake: the IWDG runs on its own clock domain and the
+    // vendor driver polls these bits without timeout. Bounding this would
+    // silently continue with a half-programmed watchdog, which is worse than
+    // hanging a wedged chip here before it can run unsupervised.
     let ready = || {
         let sr = IndependentWatchdog::regs().sr().read();
         sr.write_cr_done().bit_is_set()

@@ -733,6 +733,35 @@ impl<'d, M: Mode> Flex<'d, M> {
         });
     }
 
+    /// Put the pin into disconnected mode.
+    ///
+    /// This chip's disconnected/reset state is analog (both digital buffers
+    /// off, pull off — the state [`Self::set_as_analog`] programs and the
+    /// state [`Drop`] restores); same call.
+    #[inline]
+    pub fn set_as_disconnected(&mut self) {
+        self.set_as_analog();
+    }
+
+    /// Is the pin disconnected (output buffer off and input buffer off)?
+    #[inline]
+    pub fn is_disconnected(&self) -> bool {
+        let gpio = regs(self.port());
+        gpio.oer().read().bits() & self.mask() != 0 && gpio.ier().read().bits() & self.mask() == 0
+    }
+
+    /// Is the pin configured as an input (input buffer on)?
+    #[inline]
+    pub fn is_input(&self) -> bool {
+        regs(self.port()).ier().read().bits() & self.mask() != 0
+    }
+
+    /// Is the pin configured as an output (output buffer on)?
+    #[inline]
+    pub fn is_output(&self) -> bool {
+        regs(self.port()).oer().read().bits() & self.mask() == 0
+    }
+
     /// Select an explicit alternate function from 0 through 7.
     ///
     /// This only changes the mux field. Configure input/output direction,
@@ -790,6 +819,14 @@ impl<'d, M: Mode> Flex<'d, M> {
     /// Return the sampled pin level.
     #[inline]
     pub fn get_level(&self) -> Level {
+        self.level()
+    }
+
+    /// Get the current pin input level.
+    ///
+    /// Canonical guideline spelling; [`Self::get_level`] is the same call.
+    #[inline]
+    pub fn level(&self) -> Level {
         self.is_high().into()
     }
 
@@ -854,7 +891,31 @@ impl<'d, M: Mode> Flex<'d, M> {
     /// Return the configured output level.
     #[inline]
     pub fn get_output_level(&self) -> Level {
-        self.is_set_high().into()
+        self.output_level()
+    }
+
+    /// What level output is set to.
+    ///
+    /// Canonical guideline spelling; [`Self::get_output_level`] is the same call.
+    #[inline]
+    pub fn output_level(&self) -> Level {
+        self.output_is_high().into()
+    }
+
+    /// Is the output pin set as high?
+    ///
+    /// Canonical guideline spelling; [`Self::is_set_high`] is the same call.
+    #[inline]
+    pub fn output_is_high(&self) -> bool {
+        self.is_set_high()
+    }
+
+    /// Is the output pin set as low?
+    ///
+    /// Canonical guideline spelling; [`Self::is_set_low`] is the same call.
+    #[inline]
+    pub fn output_is_low(&self) -> bool {
+        self.is_set_low()
     }
 
     /// Toggle the configured output level.
@@ -1006,7 +1067,15 @@ impl<'d, M: Mode> Input<'d, M> {
     /// Return the sampled input level.
     #[inline]
     pub fn get_level(&self) -> Level {
-        self.pin.get_level()
+        self.level()
+    }
+
+    /// Get the current pin input level.
+    ///
+    /// Canonical guideline spelling; [`Self::get_level`] is the same call.
+    #[inline]
+    pub fn level(&self) -> Level {
+        self.pin.level()
     }
 
     /// Configure wakeup from stop modes 0, 1, and 2.
@@ -1076,19 +1145,43 @@ impl<'d> Output<'d> {
     /// Return whether the output latch is high.
     #[inline]
     pub fn is_set_high(&self) -> bool {
-        self.pin.is_set_high()
+        self.output_is_high()
     }
 
     /// Return whether the output latch is low.
     #[inline]
     pub fn is_set_low(&self) -> bool {
-        self.pin.is_set_low()
+        self.output_is_low()
     }
 
     /// Return the output latch level.
     #[inline]
     pub fn get_output_level(&self) -> Level {
-        self.pin.get_output_level()
+        self.output_level()
+    }
+
+    /// Is the output pin set as high?
+    ///
+    /// Canonical guideline spelling; [`Self::is_set_high`] is the same call.
+    #[inline]
+    pub fn output_is_high(&self) -> bool {
+        self.pin.output_is_high()
+    }
+
+    /// Is the output pin set as low?
+    ///
+    /// Canonical guideline spelling; [`Self::is_set_low`] is the same call.
+    #[inline]
+    pub fn output_is_low(&self) -> bool {
+        self.pin.output_is_low()
+    }
+
+    /// What level output is set to.
+    ///
+    /// Canonical guideline spelling; [`Self::get_output_level`] is the same call.
+    #[inline]
+    pub fn output_level(&self) -> Level {
+        self.pin.output_level()
     }
 
     /// Toggle the output latch.
@@ -1212,19 +1305,43 @@ impl<'d, M: Mode> OutputOpenDrain<'d, M> {
     /// Return whether the output is released.
     #[inline]
     pub fn is_set_high(&self) -> bool {
-        self.pin.is_set_high()
+        self.output_is_high()
     }
 
     /// Return whether the output is driving low.
     #[inline]
     pub fn is_set_low(&self) -> bool {
-        self.pin.is_set_low()
+        self.output_is_low()
     }
 
     /// Return the configured logical output level.
     #[inline]
     pub fn get_output_level(&self) -> Level {
-        self.pin.get_output_level()
+        self.output_level()
+    }
+
+    /// Is the output pin set as high?
+    ///
+    /// Canonical guideline spelling; [`Self::is_set_high`] is the same call.
+    #[inline]
+    pub fn output_is_high(&self) -> bool {
+        self.pin.output_is_high()
+    }
+
+    /// Is the output pin set as low?
+    ///
+    /// Canonical guideline spelling; [`Self::is_set_low`] is the same call.
+    #[inline]
+    pub fn output_is_low(&self) -> bool {
+        self.pin.output_is_low()
+    }
+
+    /// What level output is set to.
+    ///
+    /// Canonical guideline spelling; [`Self::get_output_level`] is the same call.
+    #[inline]
+    pub fn output_level(&self) -> Level {
+        self.pin.output_level()
     }
 
     /// Toggle between released and low.
@@ -1248,7 +1365,15 @@ impl<'d, M: Mode> OutputOpenDrain<'d, M> {
     /// Return the sampled pin level.
     #[inline]
     pub fn get_level(&self) -> Level {
-        self.pin.get_level()
+        self.level()
+    }
+
+    /// Get the current pin input level.
+    ///
+    /// Canonical guideline spelling; [`Self::get_level`] is the same call.
+    #[inline]
+    pub fn level(&self) -> Level {
+        self.pin.level()
     }
 
     /// Convert the output back into a flexible pin.

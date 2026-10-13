@@ -15,8 +15,13 @@ use crate::{Peri, pac, peripherals};
 #[non_exhaustive]
 pub struct Config {
     /// Clock divider field written to `RNGCLK` bits `[6:0]`.
+    ///
+    /// Masked to 7 bits on write: bit 7 is the clock-enable bit, set
+    /// separately (the vendor example passes `0xff`, i.e. all value bits).
     pub divider: u8,
     /// Mode field written to `RNGCR` bits `[6:0]` (entropy/preprocess/postprocess).
+    ///
+    /// Masked to 7 bits on write, like `divider`.
     pub mode: u8,
 }
 
@@ -67,13 +72,13 @@ impl<'d> Rng<'d> {
         // Reset so a second construction never inherits a stale divider,
         // mode, or error latch from a previous owner.
         let _ = rcc::reset_peripheral(Peripheral::Rng);
-        let this = Self { _peri: peri };
+        let mut this = Self { _peri: peri };
         this.configure(config);
         this
     }
 
     /// Apply configuration and enable generation.
-    pub fn configure(&self, config: Config) {
+    pub fn configure(&mut self, config: Config) {
         let regs = Self::regs();
         unsafe {
             regs.rngclk().write_with_zero(|w| {
@@ -91,7 +96,7 @@ impl<'d> Rng<'d> {
     }
 
     /// Stop the generator.
-    pub fn close(&self) {
+    pub fn close(&mut self) {
         let regs = Self::regs();
         unsafe {
             regs.rngcr().write_with_zero(|w| w.enable().clear_bit());

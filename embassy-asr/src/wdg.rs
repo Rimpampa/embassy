@@ -26,7 +26,7 @@ impl<'d> Watchdog<'d> {
     ///
     /// Per the vendor driver, the first timeout asserts the WDG interrupt and
     /// reloads the counter; a second timeout without a feed resets the system.
-    pub fn start(&self, reload_value: u32) {
+    pub fn start(&mut self, reload_value: u32) {
         unlock();
         let regs = Self::regs();
         unsafe { regs.load().write_with_zero(|w| w.load().bits(reload_value)) };
@@ -45,7 +45,7 @@ impl<'d> Watchdog<'d> {
     }
 
     /// Feed the watchdog and clear its interrupt.
-    pub fn pet(&self) {
+    pub fn pet(&mut self) {
         unlock();
         unsafe {
             Self::regs().intclr().write_with_zero(|w| w.bits(1));

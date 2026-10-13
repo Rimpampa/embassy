@@ -148,7 +148,7 @@ pub struct BsTimer<'d, T: Instance, M: Mode = Blocking> {
 impl<'d, T: Instance> BsTimer<'d, T, Blocking> {
     /// Enable clocks, release reset, apply `config`, and leave the timer stopped.
     pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Self {
-        let this = Self::create(peri);
+        let mut this = Self::create(peri);
         this.configure(config);
         this
     }
@@ -168,7 +168,7 @@ impl<'d, T: Instance> BsTimer<'d, T, Async> {
         T::Interrupt::set_priority(Priority::P3);
         unsafe { T::Interrupt::enable() };
 
-        let this = Self::create(peri);
+        let mut this = Self::create(peri);
         this.configure(config);
         this
     }
@@ -213,7 +213,7 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     }
 
     /// Apply configuration while the counter is left as-is (vendor `bstimer_init`).
-    pub fn configure(&self, config: Config) {
+    pub fn configure(&mut self, config: Config) {
         let regs = T::regs();
 
         regs.cr2().modify(|_, w| match config.master_mode {
@@ -231,41 +231,48 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
             regs.arr().write_with_zero(|w| w.arr().bits(config.period));
             regs.psc().write_with_zero(|w| w.psc().bits(config.prescaler));
         }
+
+        // PSC is shadowed until an update event; without this the first
+        // period runs with the old prescaler (reset value 0, i.e. a ~40 us
+        // "period" instead of the configured one). The forced event also
+        // latches UIF, so clear it to avoid a spurious first update.
+        self.generate_update();
+        self.clear_update_flag();
     }
 
     /// Start the counter (`CR1.CEN`).
-    pub fn start(&self) {
+    pub fn start(&mut self) {
         T::regs().cr1().modify(|_, w| w.cen().set_bit());
     }
 
     /// Stop the counter (`CR1.CEN`).
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         T::regs().cr1().modify(|_, w| w.cen().clear_bit());
     }
 
     /// Enable or disable one-pulse mode (`CR1.OPM`).
-    pub fn set_one_pulse(&self, enabled: bool) {
+    pub fn set_one_pulse(&mut self, enabled: bool) {
         T::regs().cr1().modify(|_, w| w.opm().bit(enabled));
     }
 
     /// When enabled, only counter overflow/underflow generates update events
     /// that set UIF (`CR1.URS`, vendor `bstimer_config_overflow_update`).
-    pub fn set_overflow_update(&self, enabled: bool) {
+    pub fn set_overflow_update(&mut self, enabled: bool) {
         T::regs().cr1().modify(|_, w| w.urs().bit(enabled));
     }
 
     /// Disable generation of update events (`CR1.UDIS`).
-    pub fn set_update_disabled(&self, disabled: bool) {
+    pub fn set_update_disabled(&mut self, disabled: bool) {
         T::regs().cr1().modify(|_, w| w.udis().bit(disabled));
     }
 
     /// Enable or disable DMA requests on update (`DIER.UDE`).
-    pub fn set_dma_request(&self, enabled: bool) {
+    pub fn set_dma_request(&mut self, enabled: bool) {
         T::regs().dier().modify(|_, w| w.ude().bit(enabled));
     }
 
     /// Enable or disable the update interrupt (`DIER.UIE`).
-    pub fn set_update_interrupt(&self, enabled: bool) {
+    pub fn set_update_interrupt(&mut self, enabled: bool) {
         T::regs().dier().modify(|_, w| w.uie().bit(enabled));
     }
 
@@ -279,7 +286,7 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     /// The vendor BSTIMER driver never clears this flag; GPTIMER does via
     /// `SR &= ~UIF`. This uses the same write-clear sequence through a raw
     /// pointer because the PAC marks `SR` read-only.
-    pub fn clear_update_flag(&self) {
+    pub fn clear_update_flag(&mut self) {
         clear_update_flag_raw(T::sr_ptr());
     }
 
@@ -296,7 +303,7 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     }
 
     /// Write the counter register.
-    pub fn set_counter(&self, value: u32) {
+    pub fn set_counter(&mut self, value: u32) {
         // CNT is wider than the 16-bit value field; truncate explicitly.
         unsafe {
             T::regs()
@@ -318,7 +325,7 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     /// Configure one-pulse mode as in the vendor `bstimer/onepulse` example:
     /// OPM + overflow-only updates, then force an update so `PSC` takes effect
     /// on the first period. Does not start the counter or enable the IRQ.
-    pub fn setup_one_pulse(&self) {
+    pub fn setup_one_pulse(&mut self) {
         self.set_one_pulse(true);
         self.set_overflow_update(true);
         self.generate_update();

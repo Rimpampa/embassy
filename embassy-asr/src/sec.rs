@@ -25,7 +25,7 @@ impl<'d> Sec<'d> {
     }
 
     /// Clear the flash access-policy error flag.
-    pub fn clear_flash_access_error(&self) {
+    pub fn clear_flash_access_error(&mut self) {
         Self::regs().sr().modify(|_, w| w.flash_access_error().set_bit());
     }
 
