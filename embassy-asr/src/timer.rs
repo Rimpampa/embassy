@@ -790,13 +790,13 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 
     /// Re-apply basic timer configuration while the counter is stopped.
-    pub fn configure(&self, config: Config) {
+    pub fn configure(&mut self, config: Config) {
         set_enabled::<T>(false);
         apply_basic_config::<T>(config);
     }
 
     /// Start or stop the counter (`CR1.CEN`).
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         set_enabled::<T>(enabled);
     }
 
@@ -816,7 +816,7 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 
     /// Set the auto-reload period.
-    pub fn set_period(&self, period: u16) {
+    pub fn set_period(&mut self, period: u16) {
         unsafe {
             T::regs().arr().write_with_zero(|w| w.arr().bits(period));
         }
@@ -841,12 +841,12 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 
     /// Enable or disable interrupt sources and unmask the NVIC when any are set.
-    pub fn set_interrupt_enabled(&self, flags: InterruptFlags, enabled: bool) {
+    pub fn set_interrupt_enabled(&mut self, flags: InterruptFlags, enabled: bool) {
         set_interrupt_enabled::<T>(flags, enabled);
     }
 
     /// Clear status flags (vendor `timer_clear_status`).
-    pub fn clear_interrupt(&self, flags: InterruptFlags) {
+    pub fn clear_interrupt(&mut self, flags: InterruptFlags) {
         clear_interrupt::<T>(flags);
     }
 
@@ -947,6 +947,9 @@ impl<'a, T: Instance> SimplePwmChannel<'a, T> {
 
     /// Set the compare value / duty cycle (`0..=max_duty_cycle`).
     pub fn set_duty_cycle(&mut self, duty: u16) {
+        // Saturate into range: `CCR` is 16 bits while `max_duty` (ARR + 1)
+        // can be `0x10000`, so a full 100% duty is not representable and
+        // clamps to one tick below maximum.
         let value = if self.max_duty == 0 {
             0
         } else if duty >= self.max_duty {
@@ -1083,12 +1086,12 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
     }
 
     /// Enable or disable interrupt sources.
-    pub fn set_interrupt_enabled(&self, flags: InterruptFlags, enabled: bool) {
+    pub fn set_interrupt_enabled(&mut self, flags: InterruptFlags, enabled: bool) {
         set_interrupt_enabled::<T>(flags, enabled);
     }
 
     /// Clear status flags.
-    pub fn clear_interrupt(&self, flags: InterruptFlags) {
+    pub fn clear_interrupt(&mut self, flags: InterruptFlags) {
         clear_interrupt::<T>(flags);
     }
 
@@ -1098,7 +1101,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
     }
 
     /// Start or stop the counter.
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         set_enabled::<T>(enabled);
     }
 }
@@ -1155,12 +1158,12 @@ impl<'d, T: Instance> InputCapture<'d, T> {
     }
 
     /// Enable or disable the capture interrupt for this channel.
-    pub fn set_interrupt_enabled(&self, enabled: bool) {
+    pub fn set_interrupt_enabled(&mut self, enabled: bool) {
         set_interrupt_enabled::<T>(InterruptFlags::cc(self.channel), enabled);
     }
 
     /// Clear the capture flag for this channel.
-    pub fn clear_interrupt(&self) {
+    pub fn clear_interrupt(&mut self) {
         clear_interrupt::<T>(InterruptFlags::cc(self.channel));
     }
 
@@ -1176,7 +1179,7 @@ impl<'d, T: Instance> InputCapture<'d, T> {
     }
 
     /// Start or stop the counter.
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         set_enabled::<T>(enabled);
     }
 }

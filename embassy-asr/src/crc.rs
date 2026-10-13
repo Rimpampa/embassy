@@ -134,7 +134,12 @@ impl<'d> Crc<'d> {
     }
 
     /// Feed 32-bit words and return the CRC result.
-    pub fn feed_u32(&self, data: &[u32]) -> u32 {
+    ///
+    /// The engine consumes exactly what is written: there is no
+    /// padding or length validation, so a trailing partial word must be
+    /// padded by the caller (the vendor driver pads short units with
+    /// `0xFF`).
+    pub fn feed_u32(&mut self, data: &[u32]) -> u32 {
         let regs = Self::regs();
         for word in data {
             unsafe {
@@ -146,7 +151,9 @@ impl<'d> Crc<'d> {
     }
 
     /// Feed 16-bit half-words and return the CRC result.
-    pub fn feed_u16(&self, data: &[u16]) -> u32 {
+    ///
+    /// Same no-padding contract as [`Self::feed_u32`].
+    pub fn feed_u16(&mut self, data: &[u16]) -> u32 {
         for half in data {
             unsafe {
                 core::ptr::write_volatile(CRC_DR_ADDR as *mut u16, *half);
@@ -157,7 +164,9 @@ impl<'d> Crc<'d> {
     }
 
     /// Feed bytes and return the CRC result.
-    pub fn feed_u8(&self, data: &[u8]) -> u32 {
+    ///
+    /// Same no-padding contract as [`Self::feed_u32`].
+    pub fn feed_u8(&mut self, data: &[u8]) -> u32 {
         for byte in data {
             unsafe {
                 core::ptr::write_volatile(CRC_DR_ADDR as *mut u8, *byte);
