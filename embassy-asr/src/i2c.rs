@@ -1311,6 +1311,51 @@ impl<'d> embedded_hal_async::i2c::I2c<embedded_hal::i2c::SevenBitAddress> for I2
     }
 }
 
+// --- embedded-hal 0.2 blocking traits ----------------------------------------
+
+impl<'d, M: Mode> embedded_hal_02::blocking::i2c::Read for I2c<'d, M> {
+    type Error = Error;
+
+    fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.blocking_read(address, buffer)
+    }
+}
+impl<'d, M: Mode> embedded_hal_02::blocking::i2c::Write for I2c<'d, M> {
+    type Error = Error;
+    fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(address, bytes)
+    }
+}
+
+impl<'d, M: Mode> embedded_hal_02::blocking::i2c::WriteRead for I2c<'d, M> {
+    type Error = Error;
+
+    fn write_read(&mut self, address: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.blocking_write_read(address, bytes, buffer)
+    }
+}
+
+impl<'d, M: Mode> embedded_hal_02::blocking::i2c::Transactional for I2c<'d, M> {
+    type Error = Error;
+
+    fn exec(
+        &mut self,
+        address: u8,
+        operations: &mut [embedded_hal_02::blocking::i2c::Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        use embedded_hal_02::blocking::i2c::Operation;
+        for op in operations.iter_mut() {
+            match op {
+                Operation::Read(buffer) => self.blocking_read(address, buffer)?,
+                Operation::Write(bytes) => self.blocking_write(address, bytes)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+
+
 // --- Instance / pins -------------------------------------------------------
 
 trait SealedInstance {
