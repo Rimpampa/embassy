@@ -34,6 +34,7 @@ const ASYNC_RESET_DELAY_US: u64 = 92;
 
 static CLOCKS_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SYSCLK_HZ: AtomicU32 = AtomicU32::new(0);
+static POLL_LIMIT: AtomicU32 = AtomicU32::new(1_000_000);
 static HCLK_HZ: AtomicU32 = AtomicU32::new(0);
 static PCLK0_HZ: AtomicU32 = AtomicU32::new(0);
 static PCLK1_HZ: AtomicU32 = AtomicU32::new(0);
@@ -322,6 +323,7 @@ pub fn init(_rcc: Peri<'_, peripherals::RCC>, config: Config) -> Result<Clocks, 
     HCLK_HZ.store(clocks.hclk_hz, Ordering::Relaxed);
     PCLK0_HZ.store(clocks.pclk0_hz, Ordering::Relaxed);
     PCLK1_HZ.store(clocks.pclk1_hz, Ordering::Relaxed);
+    POLL_LIMIT.store(config.readiness_poll_limit, Ordering::Relaxed);
     CLOCKS_INITIALIZED.store(true, Ordering::Release);
     Ok(clocks)
 }
@@ -706,12 +708,12 @@ fn set_peripheral_clock_raw(peripheral: Peripheral, enable: bool, poll_limit: u3
 
 /// Enable a peripheral clock using the default bounded synchronization budget.
 pub(crate) fn enable_peripheral(peripheral: Peripheral) -> Result<(), Error> {
-    set_peripheral_clock_raw(peripheral, true, Config::new().readiness_poll_limit)
+    set_peripheral_clock_raw(peripheral, true, POLL_LIMIT.load(Ordering::Relaxed))
 }
 
 /// Disable a peripheral clock using the default bounded synchronization budget.
 pub(crate) fn disable_peripheral(peripheral: Peripheral) -> Result<(), Error> {
-    set_peripheral_clock_raw(peripheral, false, Config::new().readiness_poll_limit)
+    set_peripheral_clock_raw(peripheral, false, POLL_LIMIT.load(Ordering::Relaxed))
 }
 
 fn reset_needs_release_delay(peripheral: Peripheral) -> bool {

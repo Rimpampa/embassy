@@ -455,6 +455,20 @@ impl<'d, M: Mode> Adc<'d, M> {
         let _ = rcc::enable_peripheral(Peripheral::Adc);
         let _ = rcc::reset_peripheral(Peripheral::Adc);
 
+        // Second-construction hygiene: a previous owner may have left a
+        // latched overrun, status flags, or armed enables behind (its Drop
+        // stops conversion but cannot retract an already-woken waiter).
+        OVERRUN.store(false, Ordering::Relaxed);
+        let regs = Self::regs();
+        unsafe {
+            regs.isr().write_with_zero(|w| {
+                w.eoc().set_bit();
+                w.eos().set_bit();
+                w.overrun().set_bit()
+            });
+            regs.ier().write_with_zero(|w| w);
+        }
+
         // Vendor `adc_init()`.
         analog::REG_11.modify(ANALOG_11_ADC_INIT_MASK, 0);
         delay_us(100);
@@ -740,16 +754,28 @@ impl<'d, M: Mode> Adc<'d, M> {
 impl<'d> Adc<'d, Async> {
     async fn wait_eoc(&self) -> Result<(), Error> {
         poll_fn(|cx| {
+            // Register before checking: an EOC that fires between the check
+            // and the registration must still wake us via the re-check below.
+            WAKER.register(cx.waker());
             if self.take_overrun() {
+                Self::regs().ier().modify(|_, w| {
+                    w.eoc_int_en().clear_bit();
+                    w.eos_int_en().clear_bit();
+                    w.overrun_int_en().clear_bit()
+                });
                 return Poll::Ready(Err(Error::Overrun));
             }
 
             let regs = Self::regs();
             if regs.isr().read().eoc().bit_is_set() {
+                regs.ier().modify(|_, w| {
+                    w.eoc_int_en().clear_bit();
+                    w.eos_int_en().clear_bit();
+                    w.overrun_int_en().clear_bit()
+                });
                 return Poll::Ready(Ok(()));
             }
 
-            WAKER.register(cx.waker());
             // Enable EOC (+ overrun) after registering to avoid lost wakes.
             regs.ier().modify(|_, w| {
                 w.eoc_int_en().set_bit();

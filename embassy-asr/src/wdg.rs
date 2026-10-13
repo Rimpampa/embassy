@@ -16,6 +16,9 @@ impl<'d> Watchdog<'d> {
     /// Enable the WDG clocks and leave the watchdog stopped.
     pub fn new(peri: Peri<'d, peripherals::WDG>) -> Self {
         let _ = rcc::enable_peripheral(Peripheral::Wdg);
+        // Reset so a second construction never inherits a running counter
+        // or armed reset request from a previous owner.
+        let _ = rcc::reset_peripheral(Peripheral::Wdg);
         Self { _peri: peri }
     }
 

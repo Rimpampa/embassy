@@ -22,6 +22,11 @@ const CHANNELS_PER_CONTROLLER: usize = 4;
 const CHANNEL_COUNT: usize = CONTROLLER_COUNT * CHANNELS_PER_CONTROLLER;
 const MAX_TRANSFER_COUNT: usize = 0x0fff;
 
+// Bound for the suspend/disable acknowledges in `abort`. The normal path
+// answers in a few cycles; the bound only converts a wedged channel (which
+// today hangs forever inside `Drop`) into best-effort teardown.
+const ABORT_POLL_LIMIT: u32 = 1_000_000;
+
 const DMA0_BASE: usize = 0x4002_3000;
 const DMA1_BASE: usize = 0x4002_4000;
 
@@ -1163,13 +1168,21 @@ impl<'d, M: Mode> Channel<'d, M> {
 
         if self.is_enabled() {
             self.ch_cfg_lo(self.ch_cfg_read() as u32 | CFG_L_CHANNEL_SUSPEND);
-            while self.ch_cfg_read() & u64::from(CFG_L_FIFO_EMPTY) == 0 {}
+            for _ in 0..ABORT_POLL_LIMIT {
+                if self.ch_cfg_read() & u64::from(CFG_L_FIFO_EMPTY) != 0 {
+                    break;
+                }
+            }
 
             let bit = channel_bit(self.channel);
             unsafe {
                 self.regs().chenreg().write_with_zero(|w| w.bits(u64::from(bit) << 8));
             }
-            while self.is_enabled() {}
+            for _ in 0..ABORT_POLL_LIMIT {
+                if !self.is_enabled() {
+                    break;
+                }
+            }
 
             self.ch_cfg_lo(self.ch_cfg_read() as u32 & !CFG_L_CHANNEL_SUSPEND);
         }
@@ -1207,6 +1220,9 @@ impl<'a, M: Mode> Transfer<'a, M> {
             }
         };
         compiler_fence(Ordering::SeqCst);
+        // The transfer completed; forget instead of dropping so `Drop::abort`
+        // does not re-mask interrupts and clear flags on a finished channel.
+        core::mem::forget(self);
         result
     }
 
