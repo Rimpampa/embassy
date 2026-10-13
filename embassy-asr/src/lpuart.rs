@@ -35,6 +35,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, Ordering, compiler_fence};
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -48,9 +49,6 @@ use crate::rcc::{self, Peripheral};
 use crate::{interrupt, pac, peripherals};
 
 const BAUD_INT_MAX: u32 = 0x0fff;
-
-const CR1_TX_EMPTY_INT: u32 = 1 << 7;
-const CR1_TX_DONE_INT: u32 = 1 << 8;
 
 const RCO4M_HZ: u32 = 3_600_000;
 const LOW_SPEED_HZ: u32 = 32_768;
@@ -443,19 +441,19 @@ fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
 }
 
 
-fn set_cr1_bits(regs: &RegisterBlock, mask: u32, enable: bool) {
-    let value = regs.cr1().read().bits();
-    let value = if enable { value | mask } else { value & !mask };
-    unsafe {
-        regs.cr1().write_with_zero(|w| w.bits(value));
-    }
-}
-
 fn set_tx_interrupts(regs: &RegisterBlock, enable: bool) {
     regs.cr1().modify(|_, w| {
         w.tx_empty_int().bit(enable);
         w.tx_done_int().bit(enable)
     });
+}
+
+fn set_tx_empty_interrupt(regs: &RegisterBlock, enable: bool) {
+    regs.cr1().modify(|_, w| w.tx_empty_int().bit(enable));
+}
+
+fn set_tx_done_interrupt(regs: &RegisterBlock, enable: bool) {
+    regs.cr1().modify(|_, w| w.tx_done_int().bit(enable));
 }
 
 fn calc_baud(freq: u32, baud: u32) -> Option<(u32, u32)> {
@@ -994,15 +992,18 @@ impl<'d> LpuartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        // If dropped mid-byte the TX interrupt would stay armed with no
+        // waiter; disarm it.
+        let irq_guard = OnDrop::new(|| set_tx_empty_interrupt(regs, false));
         for &byte in buffer {
             poll_fn(|cx| {
                 if tx_empty(regs) {
                     return Poll::Ready(());
                 }
                 info.state.tx_waker.register(cx.waker());
-                set_cr1_bits(regs, CR1_TX_EMPTY_INT, true);
+                set_tx_empty_interrupt(regs, true);
                 if tx_empty(regs) {
-                    set_cr1_bits(regs, CR1_TX_EMPTY_INT, false);
+                    set_tx_empty_interrupt(regs, false);
                     return Poll::Ready(());
                 }
                 Poll::Pending
@@ -1010,7 +1011,8 @@ impl<'d> LpuartTx<'d, Async> {
             .await;
             write_data(regs, byte);
         }
-        set_cr1_bits(regs, CR1_TX_EMPTY_INT, false);
+        irq_guard.defuse();
+        set_tx_empty_interrupt(regs, false);
         Ok(())
     }
 
@@ -1021,20 +1023,22 @@ impl<'d> LpuartTx<'d, Async> {
         if tx_empty(regs) && !tx_done(regs) {
             return Ok(());
         }
+        let irq_guard = OnDrop::new(|| set_tx_done_interrupt(regs, false));
         poll_fn(|cx| {
             if tx_done(regs) {
                 return Poll::Ready(());
             }
             info.state.tx_waker.register(cx.waker());
-            set_cr1_bits(regs, CR1_TX_DONE_INT, true);
+            set_tx_done_interrupt(regs, true);
             if tx_done(regs) {
-                set_cr1_bits(regs, CR1_TX_DONE_INT, false);
+                set_tx_done_interrupt(regs, false);
                 return Poll::Ready(());
             }
             Poll::Pending
         })
         .await;
-        set_cr1_bits(regs, CR1_TX_DONE_INT, false);
+        irq_guard.defuse();
+        set_tx_done_interrupt(regs, false);
         clear_tx_done(regs);
         Ok(())
     }
@@ -1048,6 +1052,9 @@ impl<'d> LpuartTx<'d, Async> {
         let dest = regs.data().as_ptr();
         set_dma_req(regs, true, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, true, false));
         let result = unsafe {
             channel
                 .write(buffer, dest.cast::<u8>(), self.info.dma_tx, TransferOptions::default())
@@ -1055,6 +1062,7 @@ impl<'d> LpuartTx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, true, false);
         result
     }
@@ -1164,6 +1172,9 @@ impl<'d> LpuartRx<'d, Async> {
         let src = regs.data().as_ptr();
         set_dma_req(regs, false, true);
         compiler_fence(Ordering::SeqCst);
+        // If dropped mid-transfer the DMA request would stay armed with no
+        // waiter; disarm it. The DMA `Transfer` future aborts its own channel.
+        let dma_guard = OnDrop::new(|| set_dma_req(regs, false, false));
         let result = unsafe {
             channel
                 .read(src.cast::<u8>(), buffer, self.info.dma_rx, TransferOptions::default())
@@ -1171,6 +1182,7 @@ impl<'d> LpuartRx<'d, Async> {
                 .await
                 .map_err(Error::Dma)
         };
+        dma_guard.defuse();
         set_dma_req(regs, false, false);
         result
     }
