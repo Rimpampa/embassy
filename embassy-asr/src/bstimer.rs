@@ -18,9 +18,6 @@ use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
 const INSTANCE_COUNT: usize = 2;
 
-const CR2_MMS_MASK: u32 = 0x70;
-const SR_UIF: u32 = 1 << 0;
-
 static WAKERS: [AtomicWaker; INSTANCE_COUNT] = [const { AtomicWaker::new() }; INSTANCE_COUNT];
 static UPDATE_PENDING: [AtomicBool; INSTANCE_COUNT] = [const { AtomicBool::new(false) }; INSTANCE_COUNT];
 
@@ -217,16 +214,20 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     pub fn configure(&self, config: Config) {
         let regs = T::regs();
 
-        regs.cr2().modify(|r, w| unsafe {
-            let bits = (r.bits() & !CR2_MMS_MASK) | (config.master_mode as u32);
-            w.bits(bits)
+        regs.cr2().modify(|_, w| match config.master_mode {
+            MasterMode::Reset => w.mms().reset(),
+            MasterMode::Enable => w.mms().enable(),
+            MasterMode::Update => w.mms().update(),
         });
 
+        // CR1 ARPE has field accessor.
         regs.cr1().modify(|_, w| w.arpe().bit(config.autoreload_preload));
 
+        // ARR/PSC `write_with_zero` is unsafe in the PAC; values are
+        // range-checked by their `u16` types.
         unsafe {
-            regs.arr().write_with_zero(|w| w.bits(u32::from(config.period)));
-            regs.psc().write_with_zero(|w| w.bits(u32::from(config.prescaler)));
+            regs.arr().write_with_zero(|w| w.arr().bits(config.period));
+            regs.psc().write_with_zero(|w| w.psc().bits(config.prescaler));
         }
     }
 
@@ -289,24 +290,27 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
 
     /// Current counter value.
     pub fn counter(&self) -> u32 {
-        T::regs().cnt().read().bits()
+        u32::from(T::regs().cnt().read().cnt().bits())
     }
 
     /// Write the counter register.
     pub fn set_counter(&self, value: u32) {
+        // CNT is wider than the 16-bit value field; truncate explicitly.
         unsafe {
-            T::regs().cnt().write_with_zero(|w| w.bits(value));
+            T::regs()
+                .cnt()
+                .write_with_zero(|w| w.cnt().bits(value as u16));
         }
     }
 
     /// Current auto-reload value.
     pub fn period(&self) -> u32 {
-        T::regs().arr().read().bits()
+        u32::from(T::regs().arr().read().arr().bits())
     }
 
     /// Current prescaler value.
     pub fn prescaler(&self) -> u32 {
-        T::regs().psc().read().bits()
+        u32::from(T::regs().psc().read().psc().bits())
     }
 
     /// Configure one-pulse mode as in the vendor `bstimer/onepulse` example:
@@ -350,8 +354,8 @@ impl<T: Instance> Drop for UpdateInterruptGuard<T> {
 #[inline]
 fn clear_update_flag_raw(sr: *mut u32) {
     // Mirror GPTIMER `timer_clear_status` / embassy-asr `timer.rs`: write 0 to
-    // the flag being cleared (rc_w0). BSTIMER PAC `SR` is read-only.
+    // the flag being cleared (rc_w0). The PAC marks `SR` read-only.
     unsafe {
-        core::ptr::write_volatile(sr, !SR_UIF);
+        core::ptr::write_volatile(sr, !(1 << 0));
     }
 }

@@ -33,22 +33,34 @@ use crate::pac::i2c0::RegisterBlock;
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, PeripheralType, interrupt, peripherals};
 
-const SR_ARB_LOSS: u32 = 1 << 18;
-const SR_IDBR_EMPTY: u32 = 1 << 19;
-const SR_DBR_FULL: u32 = 1 << 20;
-const SR_BUS_ERROR: u32 = 1 << 22;
-const SR_SLAVE_ADDR_DET: u32 = 1 << 23;
-const SR_SLAVE_STOP_DET: u32 = 1 << 24;
-const SR_ERROR_MASK: u32 = SR_ARB_LOSS | SR_BUS_ERROR;
+#[derive(Clone, Copy, Default)]
+struct IrqEnables {
+    arb_loss: bool,
+    tx_empty: bool,
+    rx_full: bool,
+    bus_error: bool,
+    slave_addr: bool,
+    slave_stop: bool,
+    master_stop: bool,
+    trans_done: bool,
+}
 
-const CR_INTR_MASK: u32 = (1 << 18) // arb loss
-    | (1 << 19) // idbr empty
-    | (1 << 20) // dbr full
-    | (1 << 22) // bus error
-    | (1 << 23) // slave addr
-    | (1 << 24) // slave stop
-    | (1 << 25) // master stop intr en
-    | (1 << 27); // trans done
+impl IrqEnables {
+    const fn errors() -> Self {
+        Self {
+            arb_loss: true,
+            tx_empty: false,
+            rx_full: false,
+            bus_error: true,
+            slave_addr: false,
+            slave_stop: false,
+            master_stop: false,
+            trans_done: false,
+        }
+    }
+}
+
+const SR_RW_MODE: u32 = 1 << 17;
 
 /// I2C transfer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,8 +229,16 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
         // writes (they run in critical sections with IRQs disabled), otherwise
         // a stale write here could cancel a START/ABORT the driver just
         // issued and wedge the unit.
-        let cr = regs.cr().read().bits() & !CR_INTR_MASK;
-        regs.cr().write_with_zero(|w| unsafe { w.bits(cr) });
+        regs.cr().modify(|_, w| {
+            w.arb_loss_det_intr_en().clear_bit();
+            w.idbr_empty_intr_en().clear_bit();
+            w.dbr_full_intr_en().clear_bit();
+            w.bus_error_intr_en().clear_bit();
+            w.slave_addr_det_intr_en().clear_bit();
+            w.slave_stop_det_intr_en().clear_bit();
+            w.master_stop_det_intr_en().clear_bit();
+            w.trans_done_intr_en().clear_bit()
+        });
 
         // Error flags are NOT cleared here: the waiter (async or blocking
         // poll loop) has to observe them through `check_errors`. A latched
@@ -294,12 +314,16 @@ fn program_timing(regs: &RegisterBlock, pclk: u32, frequency: Frequency) {
     let slv = (pclk / Frequency::Standard.hertz()).saturating_sub(8) / 2;
     let flv = (pclk / Frequency::Fast.hertz()).saturating_sub(8) / 2;
     let flv = flv.saturating_sub(1);
-    let lcr = (slv & 0x1ff) | ((flv & 0x1ff) << 9);
     let wcr = flv / 3;
 
     unsafe {
-        regs.lcr().write_with_zero(|w| w.bits(lcr));
-        regs.wcr().write_with_zero(|w| w.bits(wcr));
+        regs.lcr().write_with_zero(|w| {
+            // 9-bit phase-decrementer loads; the masks match the PAC fields.
+            w.slv().bits((slv & 0x1ff) as u16);
+            w.flv().bits((flv & 0x1ff) as u16)
+        });
+        // 5-bit setup/hold counter; in-range for every supported PCLK.
+        regs.wcr().write_with_zero(|w| w.count().bits(wcr as u8));
     }
 
     regs.cr().modify(|_, w| match frequency {
@@ -315,20 +339,50 @@ fn enable_unit(regs: &RegisterBlock, enable: bool) {
     });
 }
 
-fn clear_sr(regs: &RegisterBlock, mask: u32) {
+fn clear_arb_loss(regs: &RegisterBlock) {
     unsafe {
-        regs.sr().write_with_zero(|w| w.bits(mask));
+        regs.sr().write_with_zero(|w| w.arb_loss_det().set_bit());
+    }
+}
+
+fn clear_bus_error(regs: &RegisterBlock) {
+    unsafe {
+        regs.sr().write_with_zero(|w| w.bus_error().set_bit());
+    }
+}
+
+fn clear_tx_empty(regs: &RegisterBlock) {
+    unsafe {
+        regs.sr().write_with_zero(|w| w.idbr_empty().set_bit());
+    }
+}
+
+fn clear_rx_full(regs: &RegisterBlock) {
+    unsafe {
+        regs.sr().write_with_zero(|w| w.dbr_full().set_bit());
+    }
+}
+
+fn clear_slave_addr(regs: &RegisterBlock) {
+    unsafe {
+        regs.sr().write_with_zero(|w| w.slave_addr_det().set_bit());
+    }
+}
+
+fn clear_slave_stop(regs: &RegisterBlock) {
+    unsafe {
+        regs.sr().write_with_zero(|w| w.slave_stop_det().set_bit());
     }
 }
 
 fn check_errors(regs: &RegisterBlock) -> Result<(), Error> {
     let sr = regs.sr().read();
     if sr.arb_loss_det().bit_is_set() {
-        clear_sr(regs, SR_ARB_LOSS);
+        clear_arb_loss(regs);
         return Err(Error::Arbitration);
     }
     if sr.bus_error().bit_is_set() {
-        clear_sr(regs, SR_BUS_ERROR);
+        clear_bus_error(regs);
         return Err(Error::Bus);
     }
     Ok(())
@@ -367,7 +421,7 @@ fn master_send_start(regs: &RegisterBlock, addr7: u8, read: bool) {
     critical(|| {
         regs.cr().modify(|_, w| w.master_abort().clear_bit());
         unsafe {
-            regs.dbr().write_with_zero(|w| w.bits(u32::from(data)));
+            regs.dbr().write_with_zero(|w| w.data_buffer().bits(data));
         }
         regs.cr().modify(|_, w| {
             w.stop().clear_bit();
@@ -380,7 +434,7 @@ fn master_send_start(regs: &RegisterBlock, addr7: u8, read: bool) {
 fn master_send_byte(regs: &RegisterBlock, data: u8) {
     critical(|| {
         unsafe {
-            regs.dbr().write_with_zero(|w| w.bits(u32::from(data)));
+            regs.dbr().write_with_zero(|w| w.data_buffer().bits(data));
         }
         regs.cr().modify(|_, w| {
             w.start().clear_bit();
@@ -401,7 +455,7 @@ fn set_receive_mode(regs: &RegisterBlock, ack: bool) {
 }
 
 fn read_dbr(regs: &RegisterBlock) -> u8 {
-    regs.dbr().read().bits() as u8
+    regs.dbr().read().data_buffer().bits()
 }
 
 fn enable_clock(info: &'static Info) -> Result<(), Error> {
@@ -432,7 +486,7 @@ fn init_slave(info: &'static Info, address: u8) -> Result<(), Error> {
     // Dividers are still required by the hardware; use standard timing.
     program_timing(regs, pclk, Frequency::Standard);
     unsafe {
-        regs.sar().write_with_zero(|w| w.bits(u32::from(address)));
+        regs.sar().write_with_zero(|w| w.slave_address().bits(address));
     }
     enable_unit(regs, true);
     Ok(())
@@ -444,11 +498,17 @@ fn shutdown(info: &'static Info) {
     let _ = rcc::disable_peripheral(info.peripheral);
 }
 
-fn set_irq_enables(regs: &RegisterBlock, mask: u32, enable: bool) {
+fn set_irq_enables(regs: &RegisterBlock, en: IrqEnables) {
     critical(|| {
-        regs.cr().modify(|r, w| {
-            let bits = if enable { r.bits() | mask } else { r.bits() & !mask };
-            unsafe { w.bits(bits) }
+        regs.cr().modify(|_, w| {
+            w.arb_loss_det_intr_en().bit(en.arb_loss);
+            w.idbr_empty_intr_en().bit(en.tx_empty);
+            w.dbr_full_intr_en().bit(en.rx_full);
+            w.bus_error_intr_en().bit(en.bus_error);
+            w.slave_addr_det_intr_en().bit(en.slave_addr);
+            w.slave_stop_det_intr_en().bit(en.slave_stop);
+            w.master_stop_det_intr_en().bit(en.master_stop);
+            w.trans_done_intr_en().bit(en.trans_done)
         });
     });
 }
@@ -563,7 +623,7 @@ impl<'d, M: Mode> I2c<'d, M> {
         loop {
             check_errors(regs)?;
             if regs.sr().read().idbr_empty().bit_is_set() {
-                clear_sr(regs, SR_IDBR_EMPTY);
+                clear_tx_empty(regs);
                 if nack_seen(regs) {
                     return Err(self.finish_error(Error::Nack));
                 }
@@ -577,7 +637,7 @@ impl<'d, M: Mode> I2c<'d, M> {
         loop {
             check_errors(regs)?;
             if regs.sr().read().dbr_full().bit_is_set() {
-                clear_sr(regs, SR_DBR_FULL);
+                clear_rx_full(regs);
                 return Ok(());
             }
         }
@@ -586,12 +646,12 @@ impl<'d, M: Mode> I2c<'d, M> {
     fn blocking_write_ops(&mut self, addr: u8, bytes: &[u8], send_stop: bool) -> Result<(), Error> {
         let regs = self.regs();
         master_send_start(regs, addr, false);
-        clear_sr(regs, SR_IDBR_EMPTY);
+        clear_tx_empty(regs);
         self.blocking_wait_tx_empty()?;
 
         for &byte in bytes {
             master_send_byte(regs, byte);
-            clear_sr(regs, SR_IDBR_EMPTY);
+            clear_tx_empty(regs);
             self.blocking_wait_tx_empty()?;
         }
 
@@ -614,7 +674,7 @@ impl<'d, M: Mode> I2c<'d, M> {
             // Fresh transaction: address phase.
         }
         master_send_start(regs, addr, true);
-        clear_sr(regs, SR_IDBR_EMPTY);
+        clear_tx_empty(regs);
         self.blocking_wait_tx_empty()?;
 
         let last = buffer.len() - 1;
@@ -681,12 +741,19 @@ impl<'d, M: Mode> I2c<'d, M> {
 }
 
 impl<'d> I2c<'d, Async> {
-    async fn wait_on<F>(&mut self, mut ready: F, irq_mask: u32) -> Result<(), Error>
+    async fn wait_on<F>(&mut self, mut ready: F, irq: IrqEnables) -> Result<(), Error>
     where
         F: FnMut(&RegisterBlock) -> Poll<Result<(), Error>>,
     {
         let regs = self.regs();
         let state = self.info.state;
+        // Error enables ride along with every wait.
+        let on = IrqEnables {
+            arb_loss: true,
+            bus_error: true,
+            ..irq
+        };
+        let off = IrqEnables::default();
 
         poll_fn(|cx| {
             state.waker.register(cx.waker());
@@ -695,15 +762,15 @@ impl<'d> I2c<'d, Async> {
                     // Disarm everything that could have been armed by a
                     // previous wait (including the error enables), so no
                     // latched flag can re-trigger the ISR later.
-                    set_irq_enables(regs, irq_mask | SR_ERROR_MASK, false);
+                    set_irq_enables(regs, off);
                     Poll::Ready(result)
                 }
                 Poll::Pending => {
-                    set_irq_enables(regs, irq_mask | SR_ERROR_MASK, true);
+                    set_irq_enables(regs, on);
                     // Re-check after arming to close the race.
                     match ready(regs) {
                         Poll::Ready(result) => {
-                            set_irq_enables(regs, irq_mask | SR_ERROR_MASK, false);
+                            set_irq_enables(regs, off);
                             Poll::Ready(result)
                         }
                         Poll::Pending => Poll::Pending,
@@ -722,7 +789,7 @@ impl<'d> I2c<'d, Async> {
                     return Poll::Ready(Err(e));
                 }
                 if regs.sr().read().idbr_empty().bit_is_set() {
-                    clear_sr(regs, SR_IDBR_EMPTY);
+                    clear_tx_empty(regs);
                     if nack_seen(regs) {
                         Poll::Ready(Err(Error::Nack))
                     } else {
@@ -732,7 +799,10 @@ impl<'d> I2c<'d, Async> {
                     Poll::Pending
                 }
             },
-            SR_IDBR_EMPTY,
+            IrqEnables {
+                tx_empty: true,
+                ..Default::default()
+            },
         )
         .await
         .map_err(|e| self.finish_error(e))
@@ -745,13 +815,16 @@ impl<'d> I2c<'d, Async> {
                     return Poll::Ready(Err(e));
                 }
                 if regs.sr().read().dbr_full().bit_is_set() {
-                    clear_sr(regs, SR_DBR_FULL);
+                    clear_rx_full(regs);
                     Poll::Ready(Ok(()))
                 } else {
                     Poll::Pending
                 }
             },
-            SR_DBR_FULL,
+            IrqEnables {
+                rx_full: true,
+                ..Default::default()
+            },
         )
         .await
         .map_err(|e| self.finish_error(e))
@@ -855,12 +928,12 @@ impl<'d> I2c<'d, Async> {
     async fn write_ops(&mut self, addr: u8, bytes: &[u8], send_stop: bool) -> Result<(), Error> {
         let regs = self.regs();
         master_send_start(regs, addr, false);
-        clear_sr(regs, SR_IDBR_EMPTY);
+        clear_tx_empty(regs);
         self.wait_tx_empty().await?;
 
         for &byte in bytes {
             master_send_byte(self.regs(), byte);
-            clear_sr(self.regs(), SR_IDBR_EMPTY);
+            clear_tx_empty(self.regs());
             self.wait_tx_empty().await?;
         }
 
@@ -880,7 +953,7 @@ impl<'d> I2c<'d, Async> {
 
         let regs = self.regs();
         master_send_start(regs, addr, true);
-        clear_sr(regs, SR_IDBR_EMPTY);
+        clear_tx_empty(regs);
         self.wait_tx_empty().await?;
 
         let last = buffer.len() - 1;
@@ -1061,9 +1134,9 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
         loop {
             check_errors(regs)?;
             if regs.sr().read().slave_addr_det().bit_is_set() {
-                clear_sr(regs, SR_SLAVE_ADDR_DET);
+                clear_slave_addr(regs);
                 // RW_MODE mirrors the R/W bit: 0 = master write / slave read.
-                let op = if regs.sr().read().bits() & (1 << 17) != 0 {
+                let op = if regs.sr().read().bits() & SR_RW_MODE != 0 {
                     SlaveOp::Write
                 } else {
                     SlaveOp::Read
@@ -1081,11 +1154,11 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
             loop {
                 check_errors(regs)?;
                 if regs.sr().read().dbr_full().bit_is_set() {
-                    clear_sr(regs, SR_DBR_FULL);
+                    clear_rx_full(regs);
                     break;
                 }
                 if regs.sr().read().slave_stop_det().bit_is_set() {
-                    clear_sr(regs, SR_SLAVE_STOP_DET);
+                    clear_slave_stop(regs);
                     return Ok(());
                 }
             }
@@ -1099,15 +1172,15 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
         let regs = self.regs();
         for &byte in bytes {
             master_send_byte(regs, byte);
-            clear_sr(regs, SR_IDBR_EMPTY);
+            clear_tx_empty(regs);
             loop {
                 check_errors(regs)?;
                 if regs.sr().read().idbr_empty().bit_is_set() {
-                    clear_sr(regs, SR_IDBR_EMPTY);
+                    clear_tx_empty(regs);
                     break;
                 }
                 if regs.sr().read().slave_stop_det().bit_is_set() {
-                    clear_sr(regs, SR_SLAVE_STOP_DET);
+                    clear_slave_stop(regs);
                     return Ok(());
                 }
             }
@@ -1122,7 +1195,7 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
         loop {
             check_errors(regs)?;
             if regs.sr().read().slave_stop_det().bit_is_set() {
-                clear_sr(regs, SR_SLAVE_STOP_DET);
+                clear_slave_stop(regs);
                 return Ok(());
             }
         }
@@ -1130,25 +1203,32 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
 }
 
 impl<'d> I2cSlave<'d, Async> {
-    async fn wait_mask<F>(&mut self, mut ready: F, irq_mask: u32) -> Result<(), Error>
+    async fn wait_mask<F>(&mut self, mut ready: F, irq: IrqEnables) -> Result<(), Error>
     where
         F: FnMut(&RegisterBlock) -> Poll<Result<(), Error>>,
     {
         let regs = self.regs();
         let state = self.info.state;
+        // Error enables ride along with every wait.
+        let on = IrqEnables {
+            arb_loss: true,
+            bus_error: true,
+            ..irq
+        };
+        let off = IrqEnables::default();
 
         poll_fn(|cx| {
             state.waker.register(cx.waker());
             match ready(regs) {
                 Poll::Ready(result) => {
-                    set_irq_enables(regs, irq_mask | SR_ERROR_MASK, false);
+                    set_irq_enables(regs, off);
                     Poll::Ready(result)
                 }
                 Poll::Pending => {
-                    set_irq_enables(regs, irq_mask | SR_ERROR_MASK, true);
+                    set_irq_enables(regs, on);
                     match ready(regs) {
                         Poll::Ready(result) => {
-                            set_irq_enables(regs, irq_mask | SR_ERROR_MASK, false);
+                            set_irq_enables(regs, off);
                             Poll::Ready(result)
                         }
                         Poll::Pending => Poll::Pending,
@@ -1168,8 +1248,8 @@ impl<'d> I2cSlave<'d, Async> {
                     return Poll::Ready(Err(e));
                 }
                 if regs.sr().read().slave_addr_det().bit_is_set() {
-                    clear_sr(regs, SR_SLAVE_ADDR_DET);
-                    op = if regs.sr().read().bits() & (1 << 17) != 0 {
+                    clear_slave_addr(regs);
+                    op = if regs.sr().read().bits() & SR_RW_MODE != 0 {
                         SlaveOp::Write
                     } else {
                         SlaveOp::Read
@@ -1179,7 +1259,10 @@ impl<'d> I2cSlave<'d, Async> {
                     Poll::Pending
                 }
             },
-            SR_SLAVE_ADDR_DET,
+            IrqEnables {
+                slave_addr: true,
+                ..Default::default()
+            },
         )
         .await?;
         Ok(op)
@@ -1196,18 +1279,22 @@ impl<'d> I2cSlave<'d, Async> {
                         return Poll::Ready(Err(e));
                     }
                     if regs.sr().read().dbr_full().bit_is_set() {
-                        clear_sr(regs, SR_DBR_FULL);
+                        clear_rx_full(regs);
                         done = true;
                         Poll::Ready(Ok(()))
                     } else if regs.sr().read().slave_stop_det().bit_is_set() {
-                        clear_sr(regs, SR_SLAVE_STOP_DET);
+                        clear_slave_stop(regs);
                         done = false;
                         Poll::Ready(Ok(()))
                     } else {
                         Poll::Pending
                     }
                 },
-                SR_DBR_FULL | SR_SLAVE_STOP_DET,
+                IrqEnables {
+                    rx_full: true,
+                    slave_stop: true,
+                    ..Default::default()
+                },
             )
             .await?;
             if !done {
@@ -1222,7 +1309,7 @@ impl<'d> I2cSlave<'d, Async> {
     pub async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
         for &byte in bytes {
             master_send_byte(self.regs(), byte);
-            clear_sr(self.regs(), SR_IDBR_EMPTY);
+            clear_tx_empty(self.regs());
             let mut early_stop = false;
             self.wait_mask(
                 |regs| {
@@ -1230,17 +1317,21 @@ impl<'d> I2cSlave<'d, Async> {
                         return Poll::Ready(Err(e));
                     }
                     if regs.sr().read().idbr_empty().bit_is_set() {
-                        clear_sr(regs, SR_IDBR_EMPTY);
+                        clear_tx_empty(regs);
                         Poll::Ready(Ok(()))
                     } else if regs.sr().read().slave_stop_det().bit_is_set() {
-                        clear_sr(regs, SR_SLAVE_STOP_DET);
+                        clear_slave_stop(regs);
                         early_stop = true;
                         Poll::Ready(Ok(()))
                     } else {
                         Poll::Pending
                     }
                 },
-                SR_IDBR_EMPTY | SR_SLAVE_STOP_DET,
+                IrqEnables {
+                    tx_empty: true,
+                    slave_stop: true,
+                    ..Default::default()
+                },
             )
             .await?;
             if early_stop {
@@ -1259,13 +1350,16 @@ impl<'d> I2cSlave<'d, Async> {
                     return Poll::Ready(Err(e));
                 }
                 if regs.sr().read().slave_stop_det().bit_is_set() {
-                    clear_sr(regs, SR_SLAVE_STOP_DET);
+                    clear_slave_stop(regs);
                     Poll::Ready(Ok(()))
                 } else {
                     Poll::Pending
                 }
             },
-            SR_SLAVE_STOP_DET,
+            IrqEnables {
+                slave_stop: true,
+                ..Default::default()
+            },
         )
         .await
     }

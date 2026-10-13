@@ -25,41 +25,10 @@ use crate::rcc::{self, Peripheral as RccPeripheral};
 use crate::time::Hertz;
 use crate::{Peri, PeripheralType, interrupt, pac, peripherals};
 
-const CR1_CEN: u32 = 1 << 0;
-const CR1_DIR: u32 = 1 << 4;
-const CR1_CMS_MASK: u32 = 0x60;
-const CR1_ARPE: u32 = 1 << 7;
-const CR1_CKD_MASK: u32 = 0x300;
-
-const CCMR_OC_MODE_MASK_EVEN: u32 = 0x70;
-const CCMR_OC_MODE_MASK_ODD: u32 = 0x7000;
-const CCMR_CC_SEL_MASK_EVEN: u32 = 0x3;
-const CCMR_CC_SEL_MASK_ODD: u32 = 0x300;
+// IC-filter bit positions have no PAC accessor; the input-capture path
+// clears them raw while programming the mapping through `ccXs`.
 const CCMR_IC_FILTER_MASK_EVEN: u32 = 0xf0;
 const CCMR_IC_FILTER_MASK_ODD: u32 = 0xf000;
-const CCMR_OCPE_EVEN: u32 = 1 << 3;
-const CCMR_OCPE_ODD: u32 = 1 << 11;
-
-const OC_PWM1_EVEN: u32 = 0x60;
-const OC_PWM1_ODD: u32 = 0x6000;
-const OC_PWM2_EVEN: u32 = 0x70;
-const OC_PWM2_ODD: u32 = 0x7000;
-
-const CC_SEL_INPUT_SAME_EVEN: u32 = 0x1;
-const CC_SEL_INPUT_SAME_ODD: u32 = 0x100;
-
-const CCER_CC0E: u32 = 1 << 0;
-const CCER_CC0P: u32 = 1 << 1;
-const CCER_CC0NP: u32 = 1 << 3;
-const CCER_CC1E: u32 = 1 << 4;
-const CCER_CC1P: u32 = 1 << 5;
-const CCER_CC1NP: u32 = 1 << 7;
-const CCER_CC2E: u32 = 1 << 8;
-const CCER_CC2P: u32 = 1 << 9;
-const CCER_CC2NP: u32 = 1 << 11;
-const CCER_CC3E: u32 = 1 << 12;
-const CCER_CC3P: u32 = 1 << 13;
-const CCER_CC3NP: u32 = 1 << 15;
 
 const SR_IT_MASK: u32 = 0x5f;
 const DIER_IT_MASK: u32 = 0x5f;
@@ -389,43 +358,48 @@ fn enable_instance<T: Instance>() -> Result<(), Error> {
 
 fn apply_basic_config<T: Instance>(config: Config) {
     let regs = T::regs();
-    regs.cr1().modify(|r, w| unsafe {
-        let mut bits = r.bits();
-        bits &= !(CR1_DIR | CR1_CMS_MASK | CR1_CKD_MASK | CR1_ARPE | CR1_CEN);
-        bits |= config.clock_division as u32;
-        if config.autoreload_preload {
-            bits |= CR1_ARPE;
+    regs.cr1().modify(|_, w| {
+        w.dir().clear_bit();
+        w.cms().edge_aligned();
+        w.arpe().bit(config.autoreload_preload);
+        w.cen().clear_bit();
+        match config.clock_division {
+            ClockDivision::Div1 => w.ckd().div1(),
+            ClockDivision::Div2 => w.ckd().div2(),
+            ClockDivision::Div4 => w.ckd().div4(),
         }
-        w.bits(bits)
     });
 
     unsafe {
-        regs.arr().write_with_zero(|w| w.bits(u32::from(config.period)));
-        regs.psc().write_with_zero(|w| w.bits(u32::from(config.prescaler)));
+        regs.arr().write_with_zero(|w| w.arr().bits(config.period));
+        regs.psc().write_with_zero(|w| w.psc().bits(config.prescaler));
         regs.egr().write_with_zero(|w| w.ug().set_bit());
+    }
+    unsafe {
         regs.sr().write_with_zero(|w| w.bits(!InterruptFlags::UPDATE.bits()));
     }
 }
 
 fn set_enabled<T: Instance>(enabled: bool) {
-    T::regs().cr1().modify(|r, w| unsafe {
-        let bits = if enabled {
-            r.bits() | CR1_CEN
-        } else {
-            r.bits() & !CR1_CEN
-        };
-        w.bits(bits)
-    });
+    T::regs().cr1().modify(|_, w| w.cen().bit(enabled));
 }
 
 fn set_interrupt_enabled<T: Instance>(flags: InterruptFlags, enabled: bool) {
     let mask = flags.bits() & DIER_IT_MASK;
-    T::regs().dier().modify(|r, w| unsafe {
+    let regs = T::regs();
+    regs.dier().modify(|r, w| {
         let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
-        w.bits(bits)
+        unsafe { w.bits(bits) }
     });
 
-    if T::regs().dier().read().bits() & DIER_IT_MASK != 0 {
+    let dier = regs.dier().read();
+    let any_enabled = dier.uie().bit_is_set()
+        || dier.cc0ie().bit_is_set()
+        || dier.cc1ie().bit_is_set()
+        || dier.cc2ie().bit_is_set()
+        || dier.cc3ie().bit_is_set()
+        || dier.tie().bit_is_set();
+    if any_enabled {
         T::nv_interrupt().unpend();
         unsafe { T::nv_interrupt().enable() };
     } else {
@@ -496,168 +470,269 @@ fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), Error> {
     Err(Error::InvalidFrequency)
 }
 
-fn channel_enable_mask(channel: Channel) -> u32 {
-    match channel {
-        Channel::Ch0 => CCER_CC0E,
-        Channel::Ch1 => CCER_CC1E,
-        Channel::Ch2 => CCER_CC2E,
-        Channel::Ch3 => CCER_CC3E,
-    }
-}
-
-fn channel_polarity_mask(channel: Channel) -> u32 {
-    match channel {
-        Channel::Ch0 => CCER_CC0P,
-        Channel::Ch1 => CCER_CC1P,
-        Channel::Ch2 => CCER_CC2P,
-        Channel::Ch3 => CCER_CC3P,
-    }
-}
-
-fn channel_np_mask(channel: Channel) -> u32 {
-    match channel {
-        Channel::Ch0 => CCER_CC0NP,
-        Channel::Ch1 => CCER_CC1NP,
-        Channel::Ch2 => CCER_CC2NP,
-        Channel::Ch3 => CCER_CC3NP,
-    }
-}
-
-fn channel_both_edge_mask(channel: Channel) -> u32 {
-    channel_polarity_mask(channel) | channel_np_mask(channel)
-}
-
+// PAC field accessors are used directly in each method below.
 fn set_channel_enable<T: Instance>(channel: Channel, enabled: bool) {
-    let mask = channel_enable_mask(channel);
-    T::regs().ccer().modify(|r, w| unsafe {
-        let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
-        w.bits(bits)
-    });
+    let regs = T::regs();
+    match channel {
+        Channel::Ch0 => {
+            regs.ccer().modify(|_, w| {
+                w.cc0e().bit(enabled);
+                w
+            });
+        }
+        Channel::Ch1 => {
+            regs.ccer().modify(|_, w| {
+                w.cc1e().bit(enabled);
+                w
+            });
+        }
+        Channel::Ch2 => {
+            regs.ccer().modify(|_, w| {
+                w.cc2e().bit(enabled);
+                w
+            });
+        }
+        Channel::Ch3 => {
+            regs.ccer().modify(|_, w| {
+                w.cc3e().bit(enabled);
+                w
+            });
+        }
+    }
 }
 
 fn channel_enabled<T: Instance>(channel: Channel) -> bool {
-    T::regs().ccer().read().bits() & channel_enable_mask(channel) != 0
+    let regs = T::regs();
+    match channel {
+        Channel::Ch0 => regs.ccer().read().cc0e().bit_is_set(),
+        Channel::Ch1 => regs.ccer().read().cc1e().bit_is_set(),
+        Channel::Ch2 => regs.ccer().read().cc2e().bit_is_set(),
+        Channel::Ch3 => regs.ccer().read().cc3e().bit_is_set(),
+    }
 }
 
 fn set_compare<T: Instance>(channel: Channel, value: u16) {
     let regs = T::regs();
-    let bits = u32::from(value);
     unsafe {
         match channel {
-            Channel::Ch0 => {
-                regs.ccr0().write_with_zero(|w| w.bits(bits));
-            }
-            Channel::Ch1 => {
-                regs.ccr1().write_with_zero(|w| w.bits(bits));
-            }
-            Channel::Ch2 => {
-                regs.ccr2().write_with_zero(|w| w.bits(bits));
-            }
-            Channel::Ch3 => {
-                regs.ccr3().write_with_zero(|w| w.bits(bits));
-            }
-        }
+            Channel::Ch0 => regs.ccr0().write_with_zero(|w| w.ccr0().bits(value)),
+            Channel::Ch1 => regs.ccr1().write_with_zero(|w| w.ccr1().bits(value)),
+            Channel::Ch2 => regs.ccr2().write_with_zero(|w| w.ccr2().bits(value)),
+            Channel::Ch3 => regs.ccr3().write_with_zero(|w| w.ccr3().bits(value)),
+        };
     }
 }
 
 fn get_compare<T: Instance>(channel: Channel) -> u16 {
     let regs = T::regs();
-    (match channel {
-        Channel::Ch0 => regs.ccr0().read().bits(),
-        Channel::Ch1 => regs.ccr1().read().bits(),
-        Channel::Ch2 => regs.ccr2().read().bits(),
-        Channel::Ch3 => regs.ccr3().read().bits(),
-    }) as u16
+    match channel {
+        Channel::Ch0 => regs.ccr0().read().ccr0().bits(),
+        Channel::Ch1 => regs.ccr1().read().ccr1().bits(),
+        Channel::Ch2 => regs.ccr2().read().ccr2().bits(),
+        Channel::Ch3 => regs.ccr3().read().ccr3().bits(),
+    }
+}
+
+fn set_pwm_mode(regs: &pac::gptim0::RegisterBlock, channel: Channel, mode: PwmMode) {
+    match channel {
+        Channel::Ch0 => regs.ccmr1().modify(|_, w| {
+            w.cc0s().output();
+            match mode {
+                PwmMode::Mode1 => w.oc0m().pwm1(),
+                PwmMode::Mode2 => w.oc0m().pwm2(),
+            }
+        }),
+        Channel::Ch1 => regs.ccmr1().modify(|_, w| {
+            w.cc1s().output();
+            match mode {
+                PwmMode::Mode1 => w.oc1m().pwm1(),
+                PwmMode::Mode2 => w.oc1m().pwm2(),
+            }
+        }),
+        Channel::Ch2 => regs.ccmr2().modify(|_, w| {
+            w.cc2s().output();
+            match mode {
+                PwmMode::Mode1 => w.oc2m().pwm1(),
+                PwmMode::Mode2 => w.oc2m().pwm2(),
+            }
+        }),
+        Channel::Ch3 => regs.ccmr2().modify(|_, w| {
+            w.cc3s().output();
+            match mode {
+                PwmMode::Mode1 => w.oc3m().pwm1(),
+                PwmMode::Mode2 => w.oc3m().pwm2(),
+            }
+        }),
+    };
+}
+
+fn set_output_preload(regs: &pac::gptim0::RegisterBlock, channel: Channel) {
+    match channel {
+        Channel::Ch0 => regs.ccmr1().modify(|_, w| w.oc0pe().set_bit()),
+        Channel::Ch1 => regs.ccmr1().modify(|_, w| w.oc1pe().set_bit()),
+        Channel::Ch2 => regs.ccmr2().modify(|_, w| w.oc2pe().set_bit()),
+        Channel::Ch3 => regs.ccmr2().modify(|_, w| w.oc3pe().set_bit()),
+    };
 }
 
 fn configure_pwm_channel<T: Instance>(channel: Channel, pwm: PwmConfig, duty: u16) {
     let regs = T::regs();
-    let enable = channel_enable_mask(channel);
-    let polarity = channel_polarity_mask(channel);
-    let np = channel_np_mask(channel);
 
     // Disable channel while reconfiguring (vendor `timer_config_oc`).
-    regs.ccer().modify(|r, w| unsafe { w.bits(r.bits() & !enable) });
-
-    let (mode_mask, mode_bits, sel_mask, ocpe) = if channel.index() % 2 == 0 {
-        let mode = match pwm.mode {
-            PwmMode::Mode1 => OC_PWM1_EVEN,
-            PwmMode::Mode2 => OC_PWM2_EVEN,
-        };
-        (CCMR_OC_MODE_MASK_EVEN, mode, CCMR_CC_SEL_MASK_EVEN, CCMR_OCPE_EVEN)
-    } else {
-        let mode = match pwm.mode {
-            PwmMode::Mode1 => OC_PWM1_ODD,
-            PwmMode::Mode2 => OC_PWM2_ODD,
-        };
-        (CCMR_OC_MODE_MASK_ODD, mode, CCMR_CC_SEL_MASK_ODD, CCMR_OCPE_ODD)
-    };
-
-    match channel {
-        Channel::Ch0 | Channel::Ch1 => {
-            regs.ccmr1()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !(mode_mask | sel_mask)) | mode_bits | ocpe) });
-        }
-        Channel::Ch2 | Channel::Ch3 => {
-            regs.ccmr2()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !(mode_mask | sel_mask)) | mode_bits | ocpe) });
-        }
-    }
+    set_channel_enable::<T>(channel, false);
+    set_pwm_mode(regs, channel, pwm.mode);
+    set_output_preload(regs, channel);
 
     set_compare::<T>(channel, duty);
 
-    regs.ccer().modify(|r, w| unsafe {
-        let mut bits = r.bits() & !(polarity | np);
-        if pwm.polarity == OutputPolarity::ActiveLow {
-            bits |= polarity;
+    match channel {
+        Channel::Ch0 => {
+            regs.ccer().modify(|_, w| {
+                w.cc0e().set_bit();
+                w.cc0p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc0np().clear_bit();
+                w
+            });
         }
-        bits |= enable;
-        w.bits(bits)
-    });
+        Channel::Ch1 => {
+            regs.ccer().modify(|_, w| {
+                w.cc1e().set_bit();
+                w.cc1p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc1np().clear_bit();
+                w
+            });
+        }
+        Channel::Ch2 => {
+            regs.ccer().modify(|_, w| {
+                w.cc2e().set_bit();
+                w.cc2p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc2np().clear_bit();
+                w
+            });
+        }
+        Channel::Ch3 => {
+            regs.ccer().modify(|_, w| {
+                w.cc3e().set_bit();
+                w.cc3p().bit(pwm.polarity == OutputPolarity::ActiveLow);
+                w.cc3np().clear_bit();
+                w
+            });
+        }
+    }
 }
 
 fn configure_capture_channel<T: Instance>(channel: Channel, polarity: CapturePolarity) {
     let regs = T::regs();
-    let enable = channel_enable_mask(channel);
-    let both = channel_both_edge_mask(channel);
 
-    regs.ccer().modify(|r, w| unsafe { w.bits(r.bits() & !enable) });
+    // Disable channel while reconfiguring.
+    set_channel_enable::<T>(channel, false);
 
-    let (sel_mask, sel_bits, filter_mask, oc_mask) = if channel.index() % 2 == 0 {
-        (
-            CCMR_CC_SEL_MASK_EVEN,
-            CC_SEL_INPUT_SAME_EVEN,
-            CCMR_IC_FILTER_MASK_EVEN,
-            CCMR_OC_MODE_MASK_EVEN,
-        )
-    } else {
-        (
-            CCMR_CC_SEL_MASK_ODD,
-            CC_SEL_INPUT_SAME_ODD,
-            CCMR_IC_FILTER_MASK_ODD,
-            CCMR_OC_MODE_MASK_ODD,
-        )
+    // Select input mapping through accessors and zero the output-mode
+    // field; the IC-filter bits have no PAC accessor and are cleared raw.
+    // (`input_ti1` is the value-1 mapping the vendor example selects.)
+    match channel {
+        Channel::Ch0 => regs.ccmr1().modify(|_, w| {
+            w.cc0s().input_ti1();
+            w.oc0m().frozen();
+            w
+        }),
+        Channel::Ch1 => regs.ccmr1().modify(|_, w| {
+            w.cc1s().input_ti1();
+            w.oc1m().frozen();
+            w
+        }),
+        Channel::Ch2 => regs.ccmr2().modify(|_, w| {
+            w.cc2s().input_ti1();
+            w.oc2m().frozen();
+            w
+        }),
+        Channel::Ch3 => regs.ccmr2().modify(|_, w| {
+            w.cc3s().input_ti1();
+            w.oc3m().frozen();
+            w
+        }),
     };
-
+    let filter_mask = if channel.index() % 2 == 0 {
+        CCMR_IC_FILTER_MASK_EVEN
+    } else {
+        CCMR_IC_FILTER_MASK_ODD
+    };
     match channel {
         Channel::Ch0 | Channel::Ch1 => {
-            regs.ccmr1()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !(sel_mask | filter_mask | oc_mask)) | sel_bits) });
+            regs.ccmr1().modify(|r, w| unsafe { w.bits(r.bits() & !filter_mask) });
         }
         Channel::Ch2 | Channel::Ch3 => {
-            regs.ccmr2()
-                .modify(|r, w| unsafe { w.bits((r.bits() & !(sel_mask | filter_mask | oc_mask)) | sel_bits) });
+            regs.ccmr2().modify(|r, w| unsafe { w.bits(r.bits() & !filter_mask) });
         }
     }
 
-    let polarity_bits = match polarity {
-        CapturePolarity::Rising => 0,
-        CapturePolarity::Falling => channel_polarity_mask(channel),
-        CapturePolarity::Both => both,
-    };
-
-    regs.ccer()
-        .modify(|r, w| unsafe { w.bits((r.bits() & !both) | polarity_bits | enable) });
+    let regs = T::regs();
+    match channel {
+        Channel::Ch0 => {
+            regs.ccer().modify(|_, w| {
+                w.cc0e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc0p().set_bit();
+                    w.cc0np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc0p().set_bit();
+                    w.cc0np().set_bit();
+                } else {
+                    w.cc0p().clear_bit();
+                    w.cc0np().clear_bit();
+                }
+                w
+            });
+        }
+        Channel::Ch1 => {
+            regs.ccer().modify(|_, w| {
+                w.cc1e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc1p().set_bit();
+                    w.cc1np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc1p().set_bit();
+                    w.cc1np().set_bit();
+                } else {
+                    w.cc1p().clear_bit();
+                    w.cc1np().clear_bit();
+                }
+                w
+            });
+        }
+        Channel::Ch2 => {
+            regs.ccer().modify(|_, w| {
+                w.cc2e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc2p().set_bit();
+                    w.cc2np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc2p().set_bit();
+                    w.cc2np().set_bit();
+                } else {
+                    w.cc2p().clear_bit();
+                    w.cc2np().clear_bit();
+                }
+                w
+            });
+        }
+        Channel::Ch3 => {
+            regs.ccer().modify(|_, w| {
+                w.cc3e().set_bit();
+                if polarity == CapturePolarity::Falling {
+                    w.cc3p().set_bit();
+                    w.cc3np().clear_bit();
+                } else if polarity == CapturePolarity::Both {
+                    w.cc3p().set_bit();
+                    w.cc3np().set_bit();
+                } else {
+                    w.cc3p().clear_bit();
+                    w.cc3np().clear_bit();
+                }
+                w
+            });
+        }
+    }
 }
 
 fn configure_output_af<'d>(pin: Peri<'d, impl GpioPin>, af: AlternateFunction) -> Flex<'d> {
@@ -722,29 +797,29 @@ impl<'d, T: Instance> Timer<'d, T> {
 
     /// Whether the counter is enabled.
     pub fn is_enabled(&self) -> bool {
-        T::regs().cr1().read().bits() & CR1_CEN != 0
+        T::regs().cr1().read().cen().bit_is_set()
     }
 
     /// Current counter value.
     pub fn counter(&self) -> u16 {
-        T::regs().cnt().read().bits() as u16
+        T::regs().cnt().read().cnt().bits()
     }
 
     /// Auto-reload period (`ARR`).
     pub fn period(&self) -> u16 {
-        T::regs().arr().read().bits() as u16
+        T::regs().arr().read().arr().bits()
     }
 
     /// Set the auto-reload period.
     pub fn set_period(&self, period: u16) {
         unsafe {
-            T::regs().arr().write_with_zero(|w| w.bits(u32::from(period)));
+            T::regs().arr().write_with_zero(|w| w.arr().bits(period));
         }
     }
 
     /// Prescaler (`PSC`).
     pub fn prescaler(&self) -> u16 {
-        T::regs().psc().read().bits() as u16
+        T::regs().psc().read().psc().bits()
     }
 
     /// Kernel clock frequency in hertz.
@@ -960,7 +1035,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
 
     /// Maximum duty cycle (`ARR + 1`).
     pub fn max_duty_cycle(&self) -> u16 {
-        (T::regs().arr().read().bits() as u16).saturating_add(1)
+        T::regs().arr().read().arr().bits().saturating_add(1)
     }
 
     /// Output frequency programmed into PSC/ARR.
@@ -968,8 +1043,8 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         let pclk = T::kernel_clock_hz()
             .filter(|&hz| hz != 0)
             .ok_or(Error::ClockUnavailable)?;
-        let psc = T::regs().psc().read().bits() + 1;
-        let arr = T::regs().arr().read().bits() + 1;
+        let psc = u32::from(T::regs().psc().read().psc().bits()) + 1;
+        let arr = u32::from(T::regs().arr().read().arr().bits()) + 1;
         Ok(pclk / psc / arr)
     }
 
@@ -1071,7 +1146,7 @@ impl<'d, T: Instance> InputCapture<'d, T> {
 
     /// Current free-running counter.
     pub fn counter(&self) -> u16 {
-        T::regs().cnt().read().bits() as u16
+        T::regs().cnt().read().cnt().bits()
     }
 
     /// Enable or disable the capture interrupt for this channel.

@@ -491,9 +491,7 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
             return;
         }
 
-        unsafe {
-            regs.icr().write_with_zero(|w| w.bits(pending));
-        }
+        clear_icr_flags(regs, pending);
 
         // Vendor wakeup example waits for CSR only for CMPM/ARRM; wait for any
         // flag that has a CSR acknowledge bit.
@@ -604,8 +602,10 @@ impl<'d, T: Instance> LpTimer<'d, T> {
 
     /// Write ARR and wait for `ARROK`.
     pub fn set_arr(&self, value: u16) -> Result<(), Error> {
+        // `write_with_zero` and the value writer are unsafe on ARR/CMP in
+        // the PAC; the value is range-checked by the `u16` type.
         unsafe {
-            self.regs().arr().write_with_zero(|w| w.bits(u32::from(value)));
+            self.regs().arr().write_with_zero(|w| w.arr().bits(value));
         }
         wait_isr::<T>(ISR_ARROK, TimeoutTarget::Arrok)
     }
@@ -613,24 +613,24 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// Write CMP and wait for `CMPOK`.
     pub fn set_cmp(&self, value: u16) -> Result<(), Error> {
         unsafe {
-            self.regs().cmp().write_with_zero(|w| w.bits(u32::from(value)));
+            self.regs().cmp().write_with_zero(|w| w.cmp().bits(value));
         }
         wait_isr::<T>(ISR_CMPOK, TimeoutTarget::Cmpok)
     }
 
     /// Current ARR value.
     pub fn arr(&self) -> u16 {
-        self.regs().arr().read().bits() as u16
+        self.regs().arr().read().arr().bits()
     }
 
     /// Current CMP value.
     pub fn cmp(&self) -> u16 {
-        self.regs().cmp().read().bits() as u16
+        self.regs().cmp().read().cmp().bits()
     }
 
     /// Current counter value.
     pub fn counter(&self) -> u16 {
-        self.regs().cnt().read().bits() as u16
+        self.regs().cnt().read().cnt().bits()
     }
 
     /// Start counting in single or continuous mode (vendor `lptimer_config_count_mode`).
@@ -662,9 +662,26 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// Enable or disable wake sources used with STOP modes.
     pub fn set_wakeup(&self, flags: WakeupFlags, enabled: bool) -> Result<(), Error> {
         let mask = flags.bits();
-        self.regs().cfgr().modify(|r, w| unsafe {
-            let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
-            w.bits(bits)
+        self.regs().cfgr().modify(|_, w| {
+            if mask & WakeupFlags::CMPM.bits() != 0 {
+                w.cmpm_wkup().bit(enabled);
+            }
+            if mask & WakeupFlags::ARRM.bits() != 0 {
+                w.arrm_wkup().bit(enabled);
+            }
+            if mask & WakeupFlags::EXTTRIG.bits() != 0 {
+                w.exttrig_wkup().bit(enabled);
+            }
+            if mask & WakeupFlags::UP.bits() != 0 {
+                w.up_wkup().bit(enabled);
+            }
+            if mask & WakeupFlags::DOWN.bits() != 0 {
+                w.down_wkup().bit(enabled);
+            }
+            if mask & WakeupFlags::OUT.bits() != 0 {
+                w.out_wkup().bit(enabled);
+            }
+            w
         });
         wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
@@ -738,7 +755,15 @@ impl<'d, T: Instance> LpTimer<'d, T> {
             w.bits(bits)
         });
 
-        if self.regs().ier().read().bits() & IT_MASK != 0 {
+        let ier = self.regs().ier().read();
+        let any_enabled = ier.cmpmie().bit_is_set()
+            || ier.arrmie().bit_is_set()
+            || ier.exttrigie().bit_is_set()
+            || ier.cmpokie().bit_is_set()
+            || ier.arrokie().bit_is_set()
+            || ier.upie().bit_is_set()
+            || ier.downie().bit_is_set();
+        if any_enabled {
             T::nv_interrupt().unpend();
             unsafe { T::nv_interrupt().enable() };
         } else {
@@ -749,9 +774,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// Clear interrupt status bits (vendor `lptimer_clear_interrupt` + CSR wait).
     pub fn clear_interrupt(&self, flags: InterruptFlags) -> Result<(), Error> {
         let mask = flags.bits();
-        unsafe {
-            self.regs().icr().write_with_zero(|w| w.bits(mask));
-        }
+        clear_icr_flags(self.regs(), mask);
 
         let csr_mask = interrupt_to_csr(mask);
         if csr_mask == 0 {
@@ -850,6 +873,40 @@ where
     let mut flex = Flex::new(pin);
     flex.set_alternate_function(af);
     flex
+}
+
+/// Clear exactly the `pending` event flags through per-flag ICR accessors.
+///
+/// ICR is write-1-to-clear; clearing flag-by-flag (instead of writing the
+/// raw snapshot back) cannot clear a flag that fired after the snapshot.
+fn clear_icr_flags(regs: &pac::lptim0::RegisterBlock, pending: u32) {
+    // `write_with_zero` is unsafe on W1C registers in the PAC.
+    unsafe {
+        regs.icr().write_with_zero(|w| {
+        if pending & ISR_CMPM != 0 {
+            w.cmpmcf().set_bit();
+        }
+        if pending & ISR_ARRM != 0 {
+            w.arrmcf().set_bit();
+        }
+        if pending & ISR_EXTTRIG != 0 {
+            w.exttrigcf().set_bit();
+        }
+        if pending & ISR_CMPOK != 0 {
+            w.cmpokcf().set_bit();
+        }
+        if pending & ISR_ARROK != 0 {
+            w.arrokcf().set_bit();
+        }
+        if pending & ISR_UP != 0 {
+            w.upcf().set_bit();
+        }
+        if pending & ISR_DOWN != 0 {
+            w.downcf().set_bit();
+        }
+        w
+        });
+    }
 }
 
 fn interrupt_to_csr(flags: u32) -> u32 {

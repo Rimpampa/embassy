@@ -25,9 +25,8 @@ use crate::{Peri, pac, peripherals};
 /// Maximum 12-bit sample accepted by [`Dac::set_holding`] / [`Dac::set`].
 pub const MAX_VALUE: u16 = 0x0fff;
 
-const SWTRIG: u32 = 1 << 0;
-const SR_UNDERFLOW: u32 = 1 << 0;
-const SR_EMPTY: u32 = 1 << 1;
+// NOTE: `SWTRIGR.SWTRIG`, `DHR/DOR.DATA` and `SR.UNDERFLOW/EMPTY` now have
+// PAC accessors; only the AFEC-window bits below stay raw.
 
 /// Analog-window bits touched by vendor `dac_cmd()`.
 const ANALOG_11_POWERDOWN: u32 = 3 << 24;
@@ -272,9 +271,8 @@ impl<'d> Dac<'d> {
         if value > MAX_VALUE {
             return Err(Error::InvalidData);
         }
-        // PAC gap: DHR has no field accessors.
         unsafe {
-            Self::regs().dhr().write_with_zero(|w| w.bits(u32::from(value)));
+            Self::regs().dhr().write_with_zero(|w| w.data().bits(value));
         }
         Ok(())
     }
@@ -284,9 +282,8 @@ impl<'d> Dac<'d> {
         if self.trigger_source != TriggerSource::Software {
             return Err(Error::TriggerNotSoftware);
         }
-        // PAC gap: SWTRIGR has no field accessors. Vendor writes bit 0.
         unsafe {
-            Self::regs().swtrigr().write_with_zero(|w| w.bits(SWTRIG));
+            Self::regs().swtrigr().write_with_zero(|w| w.swtrig().set_bit());
         }
         Ok(())
     }
@@ -303,8 +300,7 @@ impl<'d> Dac<'d> {
 
     /// Read the data-output register (`dac_read_output_data`).
     pub fn read_output(&self) -> u16 {
-        // PAC gap: DOR has no field accessors.
-        (Self::regs().dor().read().bits() & u32::from(MAX_VALUE)) as u16
+        Self::regs().dor().read().data().bits()
     }
 
     /// Enable or disable DAC DMA requests (`dac_dma_cmd`).
@@ -335,23 +331,21 @@ impl<'d> Dac<'d> {
 
     /// Whether a status flag is set (`dac_get_interrupt_status`).
     pub fn interrupt_status(&self, interrupt: Interrupt) -> bool {
-        // PAC gap: SR has no field accessors.
-        let sr = Self::regs().sr().read().bits();
+        let sr = Self::regs().sr().read();
         match interrupt {
-            Interrupt::Underflow => sr & SR_UNDERFLOW != 0,
-            Interrupt::Empty => sr & SR_EMPTY != 0,
+            Interrupt::Underflow => sr.underflow().bit_is_set(),
+            Interrupt::Empty => sr.empty().bit_is_set(),
         }
     }
 
     /// Clear a status flag by writing its bit (`dac_clear_interrupt`).
     pub fn clear_interrupt(&mut self, interrupt: Interrupt) {
-        let bit = match interrupt {
-            Interrupt::Underflow => SR_UNDERFLOW,
-            Interrupt::Empty => SR_EMPTY,
-        };
-        // PAC gap: SR has no field accessors.
+        // SR is write-1-to-clear; set exactly the requested flag.
         unsafe {
-            Self::regs().sr().write_with_zero(|w| w.bits(bit));
+            Self::regs().sr().write_with_zero(|w| match interrupt {
+                Interrupt::Underflow => w.underflow().set_bit(),
+                Interrupt::Empty => w.empty().set_bit(),
+            });
         }
     }
 

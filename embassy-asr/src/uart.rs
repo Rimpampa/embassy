@@ -33,29 +33,12 @@ use crate::pac::uart0::RegisterBlock;
 use crate::rcc::{self, Peripheral};
 use crate::{interrupt, pac, peripherals};
 
-const FLAG_TXFE: u32 = 1 << 7;
-const FLAG_TXFF: u32 = 1 << 5;
-const FLAG_RXFE: u32 = 1 << 4;
-const FLAG_BUSY: u32 = 1 << 3;
-
-const INT_RX: u32 = 1 << 4;
-const INT_TX: u32 = 1 << 5;
-const INT_RT: u32 = 1 << 6;
-const INT_FE: u32 = 1 << 7;
-const INT_PE: u32 = 1 << 8;
-const INT_BE: u32 = 1 << 9;
-const INT_OE: u32 = 1 << 10;
-const INT_RX_ALL: u32 = INT_RX | INT_RT | INT_FE | INT_PE | INT_BE | INT_OE;
-
-const DR_FE: u32 = 1 << 8;
-const DR_PE: u32 = 1 << 9;
-const DR_BE: u32 = 1 << 10;
-const DR_OE: u32 = 1 << 11;
-const DR_ERROR_MASK: u32 = DR_FE | DR_PE | DR_BE | DR_OE;
-
 const RCO4M_HZ: u32 = 3_600_000;
 const XO32K_HZ: u32 = 32_768;
 const XO24M_HZ: u32 = 24_000_000;
+
+// Backs the async TX path until the async-wait rework replaces it.
+const INT_TX: u32 = 1 << 5;
 
 /// Capacity of the per-UART software RX ring buffer.
 ///
@@ -150,22 +133,25 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
         let info = T::info();
         let regs = info.regs();
-        let mis = regs.mis().read().bits();
+        let mis = regs.mis().read();
 
-        if mis == 0 {
+        if mis.bits() == 0 {
             return;
         }
 
-        if mis & INT_TX != 0 {
+        if mis.txmis().bit_is_set() {
             // Disable TX interrupt; the TX task re-enables when needed.
-            let imsc = regs.imsc().read().bits() & !INT_TX;
-            unsafe {
-                regs.imsc().write_with_zero(|w| w.bits(imsc));
-            }
+            regs.imsc().modify(|_, w| w.txim().clear_bit());
             info.state.tx_waker.wake();
         }
 
-        if mis & INT_RX_ALL != 0 {
+        if mis.rxmis().bit_is_set()
+            || mis.rtmis().bit_is_set()
+            || mis.femis().bit_is_set()
+            || mis.pemis().bit_is_set()
+            || mis.bemis().bit_is_set()
+            || mis.oemis().bit_is_set()
+        {
             // Drain the hardware RX FIFO into the software ring buffer.
             //
             // The RX interrupt is deliberately *not* masked: it stays armed so
@@ -174,12 +160,12 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
             // prevents the 16-byte hardware FIFO from overflowing (and dropping
             // bytes) while the reader is momentarily busy.
             loop {
-                if flag(regs, FLAG_RXFE) {
+                if regs.fr().read().rxfe().bit_is_set() {
                     break;
                 }
-                let value = regs.dr().read().bits();
-                if value & DR_ERROR_MASK != 0 {
-                    if value & DR_OE != 0 {
+                let dr = regs.dr().read();
+                if dr.fe().bit_is_set() || dr.pe().bit_is_set() || dr.be().bit_is_set() || dr.oe().bit_is_set() {
+                    if dr.oe().bit_is_set() {
                         RX_HW_OVERRUN.fetch_add(1, Ordering::Relaxed);
                     }
                     // Writing RSC_ECR clears sticky receive-status bits.
@@ -187,7 +173,7 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
                         regs.rsr_ecr().write_with_zero(|w| w.bits(0));
                     }
                 }
-                let b = (value & 0xff) as u8;
+                let b = dr.data().bits();
 
                 let head = info.state.rx_head.load(Ordering::Acquire) as usize;
                 let next = (head + 1) % RX_BUF_CAP;
@@ -209,9 +195,11 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
             info.state.rx_waker.wake();
         }
 
-        // ICR is write-1-to-clear; the PAC models it without field accessors.
+        // ICR is write-1-to-clear: clear exactly the sources latched at
+        // entry (rxic/txic/rtic/feic/peic/beic/oeic), so an event that fires
+        // mid-handler is not dropped. The raw snapshot write preserves that.
         unsafe {
-            regs.icr().write_with_zero(|w| w.bits(mis));
+            regs.icr().write_with_zero(|w| w.bits(mis.bits()));
         }
     }
 }
@@ -364,20 +352,20 @@ impl embedded_io::Error for Error {
     }
 }
 
-fn decode_dr_error(value: u32) -> Result<u8, Error> {
-    if value & DR_OE != 0 {
+fn decode_dr_error(dr: &pac::uart0::dr::R) -> Result<u8, Error> {
+    if dr.oe().bit_is_set() {
         return Err(Error::Overrun);
     }
-    if value & DR_BE != 0 {
+    if dr.be().bit_is_set() {
         return Err(Error::Break);
     }
-    if value & DR_PE != 0 {
+    if dr.pe().bit_is_set() {
         return Err(Error::Parity);
     }
-    if value & DR_FE != 0 {
+    if dr.fe().bit_is_set() {
         return Err(Error::Framing);
     }
-    Ok((value & 0xff) as u8)
+    Ok(dr.data().bits())
 }
 
 fn calc_baud_div(uart_clk: u32, baud: u32) -> Option<(u32, u32)> {
@@ -396,14 +384,15 @@ fn calc_baud_div(uart_clk: u32, baud: u32) -> Option<(u32, u32)> {
 fn uart_clock_hz(info: &'static Info) -> Result<u32, ConfigError> {
     let clocks = rcc::clocks().ok_or(ConfigError::ClocksNotInitialized)?;
     let rcc_regs = unsafe { pac::Rcc::steal() };
-    let shift = match info.index {
-        0 => 15,
-        1 => 13,
-        2 => 11,
-        3 => 9,
+    // The PAC owns the per-UART selector positions; only the 2-bit value is
+    // interpreted here. Values match the vendor clock tree.
+    let sel = match info.index {
+        0 => rcc_regs.cr2().read().uart0_clk_sel().bits(),
+        1 => rcc_regs.cr2().read().uart1_clk_sel().bits(),
+        2 => rcc_regs.cr2().read().uart2_clk_sel().bits(),
+        3 => rcc_regs.cr2().read().uart3_clk_sel().bits(),
         _ => unreachable!(),
     };
-    let sel = (rcc_regs.cr2().read().bits() >> shift) & 0x3;
     Ok(match sel {
         1 => RCO4M_HZ,
         2 => XO32K_HZ,
@@ -440,9 +429,9 @@ fn apply_config(info: &'static Info, config: Config, has_rx: bool, has_tx: bool)
     regs.cr().modify(|_, w| w.uart_en().clear_bit());
     regs.lcr_h().modify(|_, w| w.fen().clear_bit());
     unsafe {
-        regs.imsc().write_with_zero(|w| w.bits(0));
-        regs.ibrd().write_with_zero(|w| w.bits(ibrd));
-        regs.fbrd().write_with_zero(|w| w.bits(fbrd));
+        regs.imsc().write_with_zero(|w| w);
+        regs.ibrd().write_with_zero(|w| w.baud_divint().bits(ibrd as u16));
+        regs.fbrd().write_with_zero(|w| w.baud_divfrac().bits(fbrd as u8));
     }
 
     // Reset the software RX ring buffer to empty.
@@ -520,10 +509,11 @@ fn enable_clock(info: &'static Info) -> Result<(), ConfigError> {
 fn shutdown(info: &'static Info) {
     let regs = info.regs();
     regs.cr().modify(|_, w| w.uart_en().clear_bit());
+    // Disable-all writes: every enable in these registers defaults off.
     unsafe {
-        regs.imsc().write_with_zero(|w| w.bits(0));
-        regs.dmacr().write_with_zero(|w| w.bits(0));
+        regs.imsc().write_with_zero(|w| w);
     }
+    regs.dmacr().modify(|_, w| w.tx_en().clear_bit().rx_en().clear_bit());
     let _ = rcc::disable_peripheral(info.rcc);
 }
 
@@ -540,24 +530,21 @@ fn set_rx_interrupts(regs: &RegisterBlock, enable: bool) {
     });
 }
 
-fn flag(regs: &RegisterBlock, mask: u32) -> bool {
-    regs.fr().read().bits() & mask != 0
-}
 
 fn read_dr(regs: &RegisterBlock) -> Result<u8, Error> {
-    let value = regs.dr().read().bits();
+    let dr = regs.dr().read();
     // Writing RSC_ECR clears sticky receive-status bits (PL011 / SDK).
-    if value & DR_ERROR_MASK != 0 {
+    if dr.fe().bit_is_set() || dr.pe().bit_is_set() || dr.be().bit_is_set() || dr.oe().bit_is_set() {
         unsafe {
             regs.rsr_ecr().write_with_zero(|w| w.bits(0));
         }
     }
-    decode_dr_error(value)
+    decode_dr_error(&dr)
 }
 
 fn write_dr(regs: &RegisterBlock, byte: u8) {
     unsafe {
-        regs.dr().write_with_zero(|w| w.bits(u32::from(byte)));
+        regs.dr().write_with_zero(|w| w.data().bits(byte));
     }
 }
 
@@ -833,7 +820,7 @@ impl<'d, M: Mode> UartTx<'d, M> {
     pub fn blocking_write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let regs = self.regs();
         for &byte in buffer {
-            while flag(regs, FLAG_TXFF) {}
+            while regs.fr().read().txff().bit_is_set() {}
             write_dr(regs, byte);
         }
         Ok(())
@@ -842,7 +829,7 @@ impl<'d, M: Mode> UartTx<'d, M> {
     /// Blocking flush: wait until TX FIFO empty and UART not busy.
     pub fn blocking_flush(&mut self) -> Result<(), Error> {
         let regs = self.regs();
-        while !flag(regs, FLAG_TXFE) || flag(regs, FLAG_BUSY) {}
+        while !regs.fr().read().txfe().bit_is_set() || regs.fr().read().busy().bit_is_set() {}
         Ok(())
     }
 
@@ -878,12 +865,12 @@ impl<'d> UartTx<'d, Async> {
         let regs = info.regs();
         for &byte in buffer {
             poll_fn(|cx| {
-                if !flag(regs, FLAG_TXFF) {
+                if !regs.fr().read().txff().bit_is_set() {
                     return Poll::Ready(());
                 }
                 info.state.tx_waker.register(cx.waker());
                 set_imsc_bits(regs, INT_TX, true);
-                if !flag(regs, FLAG_TXFF) {
+                if !regs.fr().read().txff().bit_is_set() {
                     set_imsc_bits(regs, INT_TX, false);
                     return Poll::Ready(());
                 }
@@ -901,13 +888,13 @@ impl<'d> UartTx<'d, Async> {
         let info = self.info;
         let regs = info.regs();
         poll_fn(|cx| {
-            if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
+            if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
                 return Poll::Ready(());
             }
             // TX interrupt fires when FIFO drops to the threshold; also useful while draining.
             info.state.tx_waker.register(cx.waker());
             set_imsc_bits(regs, INT_TX, true);
-            if flag(regs, FLAG_TXFE) && !flag(regs, FLAG_BUSY) {
+            if regs.fr().read().txfe().bit_is_set() && !regs.fr().read().busy().bit_is_set() {
                 set_imsc_bits(regs, INT_TX, false);
                 return Poll::Ready(());
             }
@@ -948,7 +935,7 @@ impl<'d, M: Mode> UartRx<'d, M> {
     pub fn blocking_read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         let regs = self.regs();
         for slot in buffer.iter_mut() {
-            while flag(regs, FLAG_RXFE) {}
+            while regs.fr().read().rxfe().bit_is_set() {}
             *slot = read_dr(regs)?;
         }
         Ok(())
@@ -979,7 +966,7 @@ impl<'d, M: Mode> UartRx<'d, M> {
 
     fn nb_read_byte(&mut self) -> Result<Option<u8>, Error> {
         let regs = self.regs();
-        if flag(regs, FLAG_RXFE) {
+        if regs.fr().read().rxfe().bit_is_set() {
             Ok(None)
         } else {
             Ok(Some(read_dr(regs)?))
@@ -999,7 +986,7 @@ impl<'d> UartRx<'d, Async> {
             }
             info.state.rx_waker.register(cx.waker());
             // Make sure the RX interrupt is armed so the ISR keeps capturing.
-            set_imsc_bits(info.regs(), INT_RX_ALL, true);
+            set_rx_interrupts(info.regs(), true);
             if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire)
             {
                 return Poll::Ready(());
@@ -1111,7 +1098,7 @@ impl<'d, M: Mode> embedded_io::Read for UartRx<'d, M> {
             return Ok(0);
         }
         // Block for the first byte, then drain the FIFO without further waits.
-        while flag(self.regs(), FLAG_RXFE) {}
+        while self.regs().fr().read().rxfe().bit_is_set() {}
         let mut n = 0;
         while n < buf.len() {
             match self.nb_read_byte()? {
