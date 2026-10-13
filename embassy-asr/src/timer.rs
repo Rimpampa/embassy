@@ -123,31 +123,27 @@ pub enum Ch2 {}
 /// Channel 3 marker.
 pub enum Ch3 {}
 
-mod sealed {
-    use super::*;
-
-    pub trait Instance {
-        fn regs() -> &'static pac::gptim0::RegisterBlock;
-        fn rcc_peripheral() -> RccPeripheral;
-        fn nv_interrupt() -> pac::Interrupt;
-        const INDEX: usize;
-        fn kernel_clock_hz() -> Option<u32>;
-    }
-
-    pub trait TimerChannel {}
+trait SealedInstance {
+    fn regs() -> &'static pac::gptim0::RegisterBlock;
+    fn rcc_peripheral() -> RccPeripheral;
+    fn nv_interrupt() -> pac::Interrupt;
+    const INDEX: usize;
+    fn kernel_clock_hz() -> Option<u32>;
 }
+
+trait SealedTimerChannel {}
 
 /// Compile-time timer channel.
 #[allow(private_bounds)]
-pub trait TimerChannel: sealed::TimerChannel {
+pub trait TimerChannel: SealedTimerChannel {
     /// Runtime channel value.
     const CHANNEL: Channel;
 }
 
-impl sealed::TimerChannel for Ch0 {}
-impl sealed::TimerChannel for Ch1 {}
-impl sealed::TimerChannel for Ch2 {}
-impl sealed::TimerChannel for Ch3 {}
+impl SealedTimerChannel for Ch0 {}
+impl SealedTimerChannel for Ch1 {}
+impl SealedTimerChannel for Ch2 {}
+impl SealedTimerChannel for Ch3 {}
 
 impl TimerChannel for Ch0 {
     const CHANNEL: Channel = Channel::Ch0;
@@ -313,14 +309,14 @@ impl Default for PwmConfig {
 
 /// GPTimer peripheral instance.
 #[allow(private_bounds)]
-pub trait Instance: sealed::Instance + PeripheralType + 'static {
+pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
     /// NVIC vector for this instance.
     type Interrupt: TypelevelInterrupt;
 }
 
 macro_rules! impl_timer {
     ($name:ident, $pac:ident, $rcc:ident, $irq:ident, $index:expr, $clock:ident) => {
-        impl sealed::Instance for peripherals::$name {
+        impl SealedInstance for peripherals::$name {
             #[inline]
             fn regs() -> &'static pac::gptim0::RegisterBlock {
                 unsafe { &*pac::$pac::ptr() }
