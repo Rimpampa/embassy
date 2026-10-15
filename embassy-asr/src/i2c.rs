@@ -89,16 +89,17 @@ impl IrqEnables {
     }
 }
 
-/// `SR` bit 17 (`RW_MODE`): set when the matched address had the R/W bit set
-/// (master read / slave transmit). The PAC skips this bit — and still does in
-/// 0.1.1, because the RM marks it reserved — so its position stays a named
-/// constant; everything else is a field accessor.
+/// `SR` bit 13 (`RW_MODE`): set when the matched address had the R/W bit set
+/// (master read / slave transmit). The SVD and the vendor `tremo_regs.h`
+/// (`I2C_SR_RW_MODE_MASK 0x2000`) agree on bit 13, but the PAC skips it —
+/// and still does in 0.1.1 — so its position stays a named constant;
+/// everything else is a field accessor.
 ///
 /// Direction is only observable from the slave side, and no P4E1 wiring
 /// exposes a second I2C pair for a single-board master/slave loopback (I2C0
 /// is shorted, I2C1 pins are consumed by SWD/SPI-flash/HLK), so this bit is
 /// a documented assumption until a two-board slave test proves it.
-const SR_RW_MODE: u32 = 1 << 17;
+const SR_RW_MODE: u32 = 1 << 13;
 
 /// Bounded poll budget for the blocking master waits below.
 ///
@@ -822,9 +823,17 @@ impl<'d> I2c<'d, Async> {
         };
         let off = IrqEnables::default();
 
-        // If dropped mid-wait the armed enables would outlive the waiter and
-        // the ISR would keep firing with nothing to wake; disarm them.
-        let irq_guard = OnDrop::new(|| set_irq_enables(regs, off));
+        // If dropped mid-wait (executor cancellation, a `select` loser, or
+        // an outer watchdog such as the ST25RFAL platform's giving up on
+        // this transfer) the unit would be left mid-transfer with START
+        // pending and no STOP: a slave holding SDA for its next bit then
+        // wedges the bus for every later transaction. Abort (STOP) first
+        // so the bus is released, then disarm the enables so the ISR stops
+        // firing with nothing to wake.
+        let irq_guard = OnDrop::new(|| {
+            master_abort(regs);
+            set_irq_enables(regs, off);
+        });
         let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
             let outcome = match ready(regs) {
