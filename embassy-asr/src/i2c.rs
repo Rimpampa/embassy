@@ -1420,6 +1420,11 @@ impl<'d> I2cSlave<'d, Async> {
     /// Wait until the slave address is detected; return the transfer direction.
     ///
     /// Deliberately without timeout (see [`I2cSlave::blocking_listen`]).
+    ///
+    /// Between consecutive transactions, consume the trailing STOP with
+    /// [`I2cSlave::wait_stop`] (as the vendor slave example does): a latched,
+    /// unconsumed STOP can keep the slave engine from matching the next
+    /// address on single-board loopback, wedging both sides.
     pub async fn listen(&mut self) -> Result<SlaveOp, Error> {
         let mut op = SlaveOp::Read;
         self.wait_mask(
