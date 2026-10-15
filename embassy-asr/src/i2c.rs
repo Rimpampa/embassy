@@ -498,10 +498,19 @@ fn master_abort(regs: &RegisterBlock) {
 fn wait_bus_free(regs: &RegisterBlock) {
     for _ in 0..10_000 {
         if regs.sr().read().bus_busy().bit_is_clear() {
-            return;
+            break;
         }
         core::hint::spin_loop();
     }
+    // Slave-processing floor on top of the bus-free time above: the unit
+    // reports the bus free the moment the STOP completes on the wire, but
+    // the slave may still be digesting the transaction (register write
+    // propagation, state-machine settle). Hitting it again within a few
+    // microseconds NACKs the address or wedges it; a few hundred
+    // microseconds of spacing makes back-to-back traffic reliable at any
+    // caller code speed (including LTO-tightened release builds).
+    // Synchronous spin so it is safe with interrupts disabled.
+    cortex_m::asm::delay(5_000);
 }
 
 /// Issue a STOP and wait until the bus is free for the next transaction.
