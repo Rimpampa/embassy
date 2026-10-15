@@ -1006,21 +1006,35 @@ impl<'d> I2c<'d, Async> {
         let mut released = self.sda.is_high();
 
         if !released {
-            // Bit-bang up to nine SCL clocks; a stuck slave finishes its
-            // byte (and releases SDA) within eight clocks.
+            // Bit-bang clocks so a stuck slave can finish its byte(s) and
+            // release SDA. Nine clocks cover one byte; budget two bytes plus
+            // margin because an abandoned multi-byte transaction (timeout
+            // drop, retried timeout) can leave the slave more than one byte
+            // deep — SDA reading high mid-way may just be a 1 bit, not idle.
+            // Keep clocking while SDA is low, then flush a full extra byte
+            // once it reads high before generating the STOP below (a STOP
+            // sent mid-byte may be ignored, leaving the slave confused).
             self.scl.set_as_output();
             self.scl.set_high();
             recover_delay();
-            for _ in 0..9u8 {
+            let mut clocks = 0u8;
+            let mut high_streak = 0u8;
+            while clocks < 27 {
                 self.scl.set_low();
                 recover_delay();
                 self.scl.set_high();
                 recover_delay();
+                clocks += 1;
                 if self.sda.is_high() {
-                    released = true;
-                    break;
+                    high_streak += 1;
+                    if high_streak >= 9 {
+                        break;
+                    }
+                } else {
+                    high_streak = 0;
                 }
             }
+            released = high_streak >= 9;
             if released {
                 // STOP condition: SDA Low -> High while SCL is High.
                 self.sda.set_as_output();
