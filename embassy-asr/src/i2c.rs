@@ -480,6 +480,46 @@ fn master_abort(regs: &RegisterBlock) {
     });
 }
 
+/// Bus-free time between transactions: spin until the unit reports the bus
+/// free after a STOP, so a directly following START cannot collide with the
+/// STOP on the wire (I2C `tBUF`: 4.7 µs standard, 1.3 µs fast).
+///
+/// The driver returns from a transfer the moment the last byte completes;
+/// without this wait a tight loop (or LTO-tightened caller code) issues the
+/// next START within a microsecond, the slave misses it and NACKs the
+/// address (or flags a bus error). The ST25R3916 on P4E1 wedges on such
+/// back-to-back traffic while spaced traffic is clean.
+///
+/// Bounded and infallible by design: on a wedged bus (slave holding SDA)
+/// `BUS_BUSY` never clears, so give up after the budget and let the caller
+/// observe the resulting NACK/timeout and run `bus_recover`. Synchronous
+/// spin (no timer await) so it is safe in every context, including the
+/// interrupt-disabled RFAL busy-poll. Typical cost is a few iterations.
+fn wait_bus_free(regs: &RegisterBlock) {
+    for _ in 0..10_000 {
+        if regs.sr().read().bus_busy().bit_is_clear() {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Issue a STOP and wait until the bus is free for the next transaction.
+///
+/// Also clears any latched arbitration-loss / bus-error flags. Those are
+/// per-transaction state, but they can latch after the last status check of
+/// a transfer — in the flag-check window, or as a side effect of the STOP
+/// itself when the slave still holds SDA — and would otherwise be reported
+/// as a spurious error by the *next* transaction's first `check_errors`.
+/// A genuine mid-transfer error is always reported by the transfer itself
+/// before this runs; anything latched at STOP time did not corrupt data.
+fn master_stop(regs: &RegisterBlock) {
+    master_abort(regs);
+    wait_bus_free(regs);
+    clear_arb_loss(regs);
+    clear_bus_error(regs);
+}
+
 fn master_send_start(regs: &RegisterBlock, addr7: u8, read: bool) {
     let data = (addr7 << 1) | u8::from(read);
     critical(|| {
@@ -678,7 +718,7 @@ impl<'d, M: Mode> I2c<'d, M> {
     }
 
     fn finish_error(&self, err: Error) -> Error {
-        master_abort(self.regs());
+        master_stop(self.regs());
         err
     }
 
@@ -724,7 +764,7 @@ impl<'d, M: Mode> I2c<'d, M> {
         }
 
         if send_stop {
-            master_abort(regs);
+            master_stop(regs);
         }
         Ok(())
     }
@@ -732,7 +772,7 @@ impl<'d, M: Mode> I2c<'d, M> {
     fn blocking_read_ops(&mut self, addr: u8, buffer: &mut [u8], restart: bool, send_stop: bool) -> Result<(), Error> {
         if buffer.is_empty() {
             if send_stop {
-                master_abort(self.regs());
+                master_stop(self.regs());
             }
             return Ok(());
         }
@@ -754,7 +794,7 @@ impl<'d, M: Mode> I2c<'d, M> {
         }
 
         if send_stop {
-            master_abort(regs);
+            master_stop(regs);
         }
         Ok(())
     }
@@ -831,7 +871,7 @@ impl<'d> I2c<'d, Async> {
         // so the bus is released, then disarm the enables so the ISR stops
         // firing with nothing to wake.
         let irq_guard = OnDrop::new(|| {
-            master_abort(regs);
+            master_stop(regs);
             set_irq_enables(regs, off);
         });
         let result = poll_fn(|cx| {
@@ -934,7 +974,8 @@ impl<'d> I2c<'d, Async> {
 
         // Abort any in-flight transfer first (vendor `i2c_master_send_stop`).
         // Best effort: a wedged unit may ignore it, which is why a hard reset
-        // follows below.
+        // follows below. No bus-free wait here: the RCC reset below disrupts
+        // the unit anyway, and the bit-bang delays already space the bus.
         master_abort(regs);
 
         // A stuck unit (SR.UNIT_BUSY latched High, a byte never shifting out of
@@ -1024,7 +1065,7 @@ impl<'d> I2c<'d, Async> {
         }
 
         if send_stop {
-            master_abort(self.regs());
+            master_stop(self.regs());
         }
         Ok(())
     }
@@ -1032,7 +1073,7 @@ impl<'d> I2c<'d, Async> {
     async fn read_ops(&mut self, addr: u8, buffer: &mut [u8], _restart: bool, send_stop: bool) -> Result<(), Error> {
         if buffer.is_empty() {
             if send_stop {
-                master_abort(self.regs());
+                master_stop(self.regs());
             }
             return Ok(());
         }
@@ -1051,7 +1092,7 @@ impl<'d> I2c<'d, Async> {
         }
 
         if send_stop {
-            master_abort(self.regs());
+            master_stop(self.regs());
         }
         Ok(())
     }
