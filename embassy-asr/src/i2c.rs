@@ -34,6 +34,7 @@
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Poll;
 
 use embassy_hal_internal::drop::OnDrop;
@@ -234,12 +235,23 @@ enum PclkSel {
 
 struct State {
     waker: AtomicWaker,
+    /// True while the async waits have the CR event enables armed.
+    ///
+    /// Kept so a poll that finds the transfer still pending does not rewrite
+    /// `CR` while a byte is in flight: busy-polling callers (the ST25RFAL
+    /// platform runs with interrupts disabled and spins the future) would
+    /// otherwise perform a CR read-modify-write millions of times per second,
+    /// racing the engine's own clearing of the auto-cleared `TB`/`START`
+    /// control bits. The ISR clears this together with the enables, so a
+    /// spurious wake re-arms.
+    armed: AtomicBool,
 }
 
 impl State {
     const fn new() -> Self {
         Self {
             waker: AtomicWaker::new(),
+            armed: AtomicBool::new(false),
         }
     }
 }
@@ -299,6 +311,9 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
         // flag left behind by a cancelled waiter is reported (and cleared)
         // by the next transaction's first status check.
 
+        // The enables this ISR just cleared must be re-armed by the waiter on
+        // its next poll; clearing the flag couples the two.
+        info.state.armed.store(false, Ordering::Release);
         info.state.waker.wake();
     }
 }
@@ -895,30 +910,43 @@ impl<'d> I2c<'d, Async> {
         let irq_guard = OnDrop::new(|| {
             master_stop(regs);
             set_irq_enables(regs, off);
+            state.armed.store(false, Ordering::Release);
         });
         let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
-            let outcome = match ready(regs) {
+            match ready(regs) {
                 Poll::Ready(result) => {
                     // Disarm everything that could have been armed by a
                     // previous wait (including the error enables), so no
                     // latched flag can re-trigger the ISR later.
                     set_irq_enables(regs, off);
+                    state.armed.store(false, Ordering::Release);
                     Poll::Ready(result)
                 }
                 Poll::Pending => {
-                    set_irq_enables(regs, on);
-                    // Re-check after arming to close the race.
-                    match ready(regs) {
-                        Poll::Ready(result) => {
-                            set_irq_enables(regs, off);
-                            Poll::Ready(result)
-                        }
-                        Poll::Pending => Poll::Pending,
+                    // Arm the enables once per wait, not once per poll: while
+                    // they stay armed, re-polling must not touch CR. Under the
+                    // RFAL busy-poll this runs with interrupts disabled and
+                    // would otherwise rewrite CR millions of times per second
+                    // while a byte is in flight, racing the engine's own
+                    // clearing of the auto-cleared TB/START bits.
+                    if !state.armed.load(Ordering::Acquire) {
+                        state.armed.store(true, Ordering::Release);
+                        set_irq_enables(regs, on);
+                        // Re-check after arming to close the race with an
+                        // event that latched before the enables were set.
+                        return match ready(regs) {
+                            Poll::Ready(result) => {
+                                set_irq_enables(regs, off);
+                                state.armed.store(false, Ordering::Release);
+                                Poll::Ready(result)
+                            }
+                            Poll::Pending => Poll::Pending,
+                        };
                     }
+                    Poll::Pending
                 }
-            };
-            outcome
+            }
         })
         .await;
         irq_guard.defuse();
@@ -1414,23 +1442,34 @@ impl<'d> I2cSlave<'d, Async> {
 
         // If dropped mid-wait the armed enables would outlive the waiter and
         // the ISR would keep firing with nothing to wake; disarm them.
-        let irq_guard = OnDrop::new(|| set_irq_enables(regs, off));
+        let irq_guard = OnDrop::new(|| {
+            set_irq_enables(regs, off);
+            state.armed.store(false, Ordering::Release);
+        });
         let result = poll_fn(|cx| {
             state.waker.register(cx.waker());
             match ready(regs) {
                 Poll::Ready(result) => {
                     set_irq_enables(regs, off);
+                    state.armed.store(false, Ordering::Release);
                     Poll::Ready(result)
                 }
                 Poll::Pending => {
-                    set_irq_enables(regs, on);
-                    match ready(regs) {
-                        Poll::Ready(result) => {
-                            set_irq_enables(regs, off);
-                            Poll::Ready(result)
-                        }
-                        Poll::Pending => Poll::Pending,
+                    // Arm once per wait, not once per poll; see
+                    // [`I2c::wait_on`] and `State::armed`.
+                    if !state.armed.load(Ordering::Acquire) {
+                        state.armed.store(true, Ordering::Release);
+                        set_irq_enables(regs, on);
+                        return match ready(regs) {
+                            Poll::Ready(result) => {
+                                set_irq_enables(regs, off);
+                                state.armed.store(false, Ordering::Release);
+                                Poll::Ready(result)
+                            }
+                            Poll::Pending => Poll::Pending,
+                        };
                     }
+                    Poll::Pending
                 }
             }
         })
