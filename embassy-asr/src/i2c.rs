@@ -734,8 +734,21 @@ impl<'d, M: Mode> I2c<'d, M> {
     fn blocking_wait_tx_empty(&self) -> Result<(), Error> {
         let regs = self.regs();
         for _ in 0..BLOCKING_POLL_LIMIT {
-            check_errors(regs)?;
-            if regs.sr().read().idbr_empty().bit_is_set() {
+            let sr = regs.sr().read();
+            // RM 15.13.2: for a master transmitter `SR.BUS_ERROR` (BED) is
+            // set when a sent byte was not ACKed, i.e. it is this unit's
+            // NACK indication, not a bus fault. Clear it and report a NACK
+            // so callers can tell a missing (or still booting) slave from a
+            // wedged bus.
+            if sr.bus_error().bit_is_set() {
+                clear_bus_error(regs);
+                return Err(self.finish_error(Error::Nack));
+            }
+            if sr.arb_loss_det().bit_is_set() {
+                clear_arb_loss(regs);
+                return Err(self.finish_error(Error::Arbitration));
+            }
+            if sr.idbr_empty().bit_is_set() {
                 clear_tx_empty(regs);
                 if nack_seen(regs) {
                     return Err(self.finish_error(Error::Nack));
@@ -915,10 +928,19 @@ impl<'d> I2c<'d, Async> {
     async fn wait_tx_empty(&mut self) -> Result<(), Error> {
         self.wait_on(
             |regs| {
-                if let Err(e) = check_errors(regs) {
-                    return Poll::Ready(Err(e));
+                let sr = regs.sr().read();
+                // BED (`BUS_ERROR`) is the master-transmit no-ACK indication
+                // (RM 15.13.2); report it as a NACK, not a bus error, for the
+                // same reason as `blocking_wait_tx_empty`.
+                if sr.bus_error().bit_is_set() {
+                    clear_bus_error(regs);
+                    return Poll::Ready(Err(Error::Nack));
                 }
-                if regs.sr().read().idbr_empty().bit_is_set() {
+                if sr.arb_loss_det().bit_is_set() {
+                    clear_arb_loss(regs);
+                    return Poll::Ready(Err(Error::Arbitration));
+                }
+                if sr.idbr_empty().bit_is_set() {
                     clear_tx_empty(regs);
                     if nack_seen(regs) {
                         Poll::Ready(Err(Error::Nack))
