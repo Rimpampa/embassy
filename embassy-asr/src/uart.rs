@@ -49,16 +49,21 @@ const RX_BUF_CAP: usize = 512;
 /// Diagnostic counters for RX byte loss. `RX_HW_OVERRUN` counts hardware FIFO
 /// overrun errors (DR.OE), i.e. bytes dropped because the ISR did not drain the
 /// 16-byte FIFO in time. `RX_RING_DROP` counts the software ring buffer dropping
-/// its oldest byte because the reader was more than [`RX_BUF_CAP`] bytes behind.
+/// its newest byte because the reader was more than [`RX_BUF_CAP`] bytes behind.
 static RX_HW_OVERRUN: AtomicU32 = AtomicU32::new(0);
 static RX_RING_DROP: AtomicU32 = AtomicU32::new(0);
+
+const RX_ERR_OVERRUN: u8 = 1 << 0;
+const RX_ERR_BREAK: u8 = 1 << 1;
+const RX_ERR_PARITY: u8 = 1 << 2;
+const RX_ERR_FRAMING: u8 = 1 << 3;
 
 /// Number of hardware FIFO overrun errors seen since boot (all UARTs).
 pub fn rx_hw_overrun_count() -> u32 {
     RX_HW_OVERRUN.load(Ordering::Relaxed)
 }
 
-/// Number of software ring-buffer drop-oldest events since boot (all UARTs).
+/// Number of software ring-buffer drop-newest events since boot (all UARTs).
 pub fn rx_ring_drop_count() -> u32 {
     RX_RING_DROP.load(Ordering::Relaxed)
 }
@@ -70,9 +75,13 @@ struct State {
     rx_waker: AtomicWaker,
     /// Number of live [`UartTx`]/ [`UartRx`] halves.
     refcount: AtomicU8,
+    /// Baud rate used for break timing.
+    baudrate: AtomicU32,
+    /// RX error flags latched by the ISR and consumed by the reader.
+    rx_error: AtomicU8,
     /// RX ring buffer write index (advanced by the ISR).
     rx_head: AtomicU16,
-    /// RX ring buffer read index (advanced by the reader).
+    /// RX ring buffer read index (advanced only by the reader).
     rx_tail: AtomicU16,
     /// RX ring buffer storage.
     rx_buf: UnsafeCell<[u8; RX_BUF_CAP]>,
@@ -84,25 +93,29 @@ impl State {
             tx_waker: AtomicWaker::new(),
             rx_waker: AtomicWaker::new(),
             refcount: AtomicU8::new(0),
+            baudrate: AtomicU32::new(0),
+            rx_error: AtomicU8::new(0),
             rx_head: AtomicU16::new(0),
             rx_tail: AtomicU16::new(0),
             rx_buf: UnsafeCell::new([0; RX_BUF_CAP]),
         }
     }
 
-    /// Reset the RX ring buffer to empty.
+    /// Reset the RX ring buffer and error latch to empty.
     fn reset_rx(&self) {
         self.rx_head.store(0, Ordering::Release);
         self.rx_tail.store(0, Ordering::Release);
+        self.rx_error.store(0, Ordering::Release);
     }
 }
 
 // Safety: `STATE` is a shared static read from both thread and interrupt
-// context. The atomics (`tx_waker`, `rx_waker`, `refcount`, `rx_head`,
-// `rx_tail`) are `Sync`. The `rx_buf` `UnsafeCell` is only ever accessed
-// through the atomic `rx_head`/`rx_tail` indices with Acquire/Release
-// ordering: the ISR writes only at `rx_head`, the reader only at `rx_tail`,
-// and the two never touch the same slot concurrently.
+// context. The atomics (`tx_waker`, `rx_waker`, `refcount`, `baudrate`,
+// `rx_error`, `rx_head`, `rx_tail`) are `Sync`. The `rx_buf` `UnsafeCell` is
+// only ever accessed through the atomic indices: the ISR writes only at
+// `rx_head` and advances it, the reader reads at `rx_tail` and advances it.
+// The producer never moves `rx_tail` (the ring drops the newest byte when
+// full), so producer and reader never touch the same slot concurrently.
 unsafe impl Sync for State {}
 
 struct Info {
@@ -162,14 +175,28 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
                     break;
                 }
                 let dr = regs.dr().read();
-                if dr.fe().bit_is_set() || dr.pe().bit_is_set() || dr.be().bit_is_set() || dr.oe().bit_is_set() {
-                    if dr.oe().bit_is_set() {
-                        RX_HW_OVERRUN.fetch_add(1, Ordering::Relaxed);
-                    }
+                let mut error = 0;
+                if dr.oe().bit_is_set() {
+                    RX_HW_OVERRUN.fetch_add(1, Ordering::Relaxed);
+                    error |= RX_ERR_OVERRUN;
+                }
+                if dr.be().bit_is_set() {
+                    error |= RX_ERR_BREAK;
+                }
+                if dr.pe().bit_is_set() {
+                    error |= RX_ERR_PARITY;
+                }
+                if dr.fe().bit_is_set() {
+                    error |= RX_ERR_FRAMING;
+                }
+                if error != 0 {
                     // Writing RSC_ECR clears sticky receive-status bits.
                     unsafe {
                         regs.rsr_ecr().write_with_zero(|w| w.bits(0));
                     }
+                    info.state.rx_error.fetch_or(error, Ordering::Release);
+                    info.state.rx_waker.wake();
+                    continue;
                 }
                 let b = dr.data().bits();
 
@@ -177,12 +204,11 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
                 let next = (head + 1) % RX_BUF_CAP;
                 let tail = info.state.rx_tail.load(Ordering::Acquire) as usize;
                 if next == tail {
-                    // Ring buffer full (reader is far behind): drop the oldest
-                    // byte to keep capturing the newest data.
+                    // Ring buffer full (reader is far behind). Keep the bytes
+                    // already queued and drop this newest one. The producer
+                    // must not advance `tail`: only the reader owns it.
                     RX_RING_DROP.fetch_add(1, Ordering::Relaxed);
-                    info.state
-                        .rx_tail
-                        .store(((tail + 1) % RX_BUF_CAP) as u16, Ordering::Release);
+                    continue;
                 }
                 unsafe {
                     let buf = info.state.rx_buf.get();
@@ -356,6 +382,21 @@ impl core::fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
+fn take_rx_error(state: &State) -> Option<Error> {
+    let error = state.rx_error.swap(0, Ordering::AcqRel);
+    if error & RX_ERR_OVERRUN != 0 {
+        Some(Error::Overrun)
+    } else if error & RX_ERR_BREAK != 0 {
+        Some(Error::Break)
+    } else if error & RX_ERR_PARITY != 0 {
+        Some(Error::Parity)
+    } else if error & RX_ERR_FRAMING != 0 {
+        Some(Error::Framing)
+    } else {
+        None
+    }
+}
+
 impl embedded_io::Error for Error {
     fn kind(&self) -> embedded_io::ErrorKind {
         match self {
@@ -448,8 +489,10 @@ fn apply_config(info: &'static Info, config: &Config, has_rx: bool, has_tx: bool
         regs.fbrd().write_with_zero(|w| w.baud_divfrac().bits(fbrd as u8));
     }
 
-    // Reset the software RX ring buffer to empty.
-    info.state.reset_rx();
+    // Reset the software RX ring buffer to empty. The RX ISR may be running,
+    // so mask interrupts while resetting the shared indices and error latch.
+    critical_section::with(|_| info.state.reset_rx());
+    info.state.baudrate.store(config.baudrate, Ordering::Release);
 
     let wlen = match config.data_bits {
         DataBits::DataBits5 => pac::uart0::lcr_h::Wlen::Value5,
@@ -586,6 +629,8 @@ pub struct Uart<'d, M: Mode> {
 /// Transmit half of a UART.
 pub struct UartTx<'d, M: Mode> {
     info: &'static Info,
+    has_tx: bool,
+    has_rx: bool,
     // `Flex` (not bare `Peri`) so dropping the half deconfigures the pins
     // back to analog via `Flex::drop`.
     _pin: Option<Flex<'d>>,
@@ -596,6 +641,8 @@ pub struct UartTx<'d, M: Mode> {
 /// Receive half of a UART.
 pub struct UartRx<'d, M: Mode> {
     info: &'static Info,
+    has_tx: bool,
+    has_rx: bool,
     _pin: Option<Flex<'d>>,
     _cts: Option<Flex<'d>>,
     _mode: PhantomData<&'d mut M>,
@@ -765,12 +812,16 @@ impl<'d, M: Mode> Uart<'d, M> {
         Ok(Self {
             tx: UartTx {
                 info,
+                has_tx,
+                has_rx,
                 _pin: tx_pin,
                 _rts: rts_pin,
                 _mode: PhantomData,
             },
             rx: UartRx {
                 info,
+                has_tx,
+                has_rx,
                 _pin: rx_pin,
                 _cts: cts_pin,
                 _mode: PhantomData,
@@ -821,9 +872,7 @@ impl<'d, M: Mode> Uart<'d, M> {
 
     /// Reconfigure the UART with new settings.
     pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        self.tx.set_config(config)?;
-        self.rx.set_config(config)?;
-        Ok(())
+        apply_config(self.tx.info, config, self.tx.has_rx, self.tx.has_tx)
     }
 
     /// Blocking DMA write.
@@ -852,13 +901,18 @@ impl<'d, M: Mode> UartTx<'d, M> {
     /// then clears it.
     pub fn send_break(&mut self) {
         let regs = self.regs();
-        // Set BRK bit
+        // Hold BRK for at least one 10-bit frame at the configured baud rate.
+        let baud = match self.info.state.baudrate.load(Ordering::Relaxed) {
+            0 => 115_200,
+            baud => baud,
+        };
+        let hclk = crate::rcc::clocks().map(|c| c.hclk_hz).unwrap_or(24_000_000);
+        let cycles = (u64::from(hclk) * 10)
+            .div_ceil(u64::from(baud))
+            .min(u64::from(u32::MAX)) as u32;
+
         regs.lcr_h().modify(|_, w| w.brk().set_bit());
-        // Hold for at least one frame time (10 bits at current baud rate)
-        // At minimum baudrate (300), one frame is ~33ms. At 115200, ~87us.
-        // Wait for 10ms which covers all practical baud rates.
-        cortex_m::asm::delay(240_000);
-        // Clear BRK bit
+        cortex_m::asm::delay(cycles);
         regs.lcr_h().modify(|_, w| w.brk().clear_bit());
     }
 
@@ -866,32 +920,25 @@ impl<'d, M: Mode> UartTx<'d, M> {
     pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
         let regs = self.regs();
         let info = self.info;
-        let uart_clk = if info.pclk0 {
-            crate::rcc::clocks()
-                .map(|c| c.pclk0_hz)
-                .ok_or(ConfigError::ClocksNotInitialized)?
-        } else {
-            crate::rcc::clocks()
-                .map(|c| c.pclk1_hz)
-                .ok_or(ConfigError::ClocksNotInitialized)?
-        };
+        let uart_clk = uart_clock_hz(info)?;
         let (ibrd, fbrd) = calc_baud_div(uart_clk, baudrate).ok_or(ConfigError::Baudrate)?;
+
+        // ARM PL011 requires the UART to be disabled while changing divisors.
+        regs.cr().modify(|_, w| w.uart_en().clear_bit());
         unsafe {
-            regs.ibrd().write_with_zero(|w| w.bits(ibrd));
-        };
-        unsafe {
-            regs.fbrd().write_with_zero(|w| w.bits(fbrd));
-        };
-        // LCR_H write is needed to latch the new baud rate divisors
+            regs.ibrd().write_with_zero(|w| w.baud_divint().bits(ibrd as u16));
+            regs.fbrd().write_with_zero(|w| w.baud_divfrac().bits(fbrd as u8));
+        }
+        // LCR_H write is needed to latch the new baud rate divisors.
         regs.lcr_h().modify(|r, w| unsafe { w.bits(r.bits()) });
+        regs.cr().modify(|_, w| w.uart_en().set_bit());
+        info.state.baudrate.store(baudrate, Ordering::Release);
         Ok(())
     }
 
     /// Reconfigure with new settings.
     pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        let info = self.info;
-        apply_config(info, config, true, true)?;
-        Ok(())
+        apply_config(self.info, config, self.has_rx, self.has_tx)
     }
 
     /// Blocking write of the entire buffer.
@@ -1045,9 +1092,7 @@ impl<'d, M: Mode> UartRx<'d, M> {
 
     /// Reconfigure with new settings.
     pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        let info = self.info;
-        apply_config(info, config, true, false)?;
-        Ok(())
+        apply_config(self.info, config, self.has_rx, self.has_tx)
     }
 
     /// Blocking read that fills the entire buffer.
@@ -1096,21 +1141,27 @@ impl<'d, M: Mode> UartRx<'d, M> {
 impl<'d> UartRx<'d, Async> {
     /// Wait until at least one byte is available in the software RX ring
     /// buffer (which the ISR keeps filled from the hardware FIFO).
-    async fn wait_rx_ready(&mut self) {
+    async fn wait_rx_ready(&mut self) -> Result<(), Error> {
         let info = self.info;
         poll_fn(|cx| {
+            if let Some(error) = take_rx_error(info.state) {
+                return Poll::Ready(Err(error));
+            }
             if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire) {
-                return Poll::Ready(());
+                return Poll::Ready(Ok(()));
             }
             info.state.rx_waker.register(cx.waker());
             // Make sure the RX interrupt is armed so the ISR keeps capturing.
             set_rx_interrupts(info.regs(), true);
+            if let Some(error) = take_rx_error(info.state) {
+                return Poll::Ready(Err(error));
+            }
             if info.state.rx_head.load(Ordering::Acquire) != info.state.rx_tail.load(Ordering::Acquire) {
-                return Poll::Ready(());
+                return Poll::Ready(Ok(()));
             }
             Poll::Pending
         })
-        .await;
+        .await
         // Leave the RX interrupt armed; the ISR keeps draining the FIFO into the
         // ring buffer so no bytes are lost between reads.
     }
@@ -1132,7 +1183,7 @@ impl<'d> UartRx<'d, Async> {
     /// Interrupt-driven read that fills the entire buffer.
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         for slot in buffer.iter_mut() {
-            self.wait_rx_ready().await;
+            self.wait_rx_ready().await?;
             // `wait_rx_ready` guarantees a byte is present.
             *slot = self.nb_read_byte_ring()?.unwrap();
         }
@@ -1278,7 +1329,7 @@ impl<'d> embedded_io_async::Read for UartRx<'d, Async> {
         if buf.is_empty() {
             return Ok(0);
         }
-        self.wait_rx_ready().await;
+        self.wait_rx_ready().await?;
         let mut n = 0;
         while n < buf.len() {
             match self.nb_read_byte_ring()? {
