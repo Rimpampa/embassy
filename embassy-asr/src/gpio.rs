@@ -633,11 +633,11 @@ impl<'d, M: Mode> Flex<'d, M> {
 
     /// Configure the documented output drive capability.
     pub fn set_drive(&mut self, drive: Drive) {
-        let mask = self.mask() as u32;
+        let mask = self.mask();
         // The SVD models DSR as write-only, but the vendor driver performs
         // read-modify-write on it. Preserve the other pins on the port.
         critical_section::with(|_| unsafe {
-            let register = regs(self.port()).dsr().as_ptr() as *mut u32;
+            let register = regs(self.port()).dsr().as_ptr();
             let mut value = core::ptr::read_volatile(register);
             match drive {
                 Drive::_4mA => value &= !mask,
