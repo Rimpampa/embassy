@@ -957,6 +957,7 @@ impl<'d, M: Mode> Channel<'d, M> {
         self.enable();
         Ok(Transfer {
             channel: self.reborrow(),
+            reload: config.reload.enabled(),
         })
     }
 
@@ -1025,6 +1026,7 @@ impl<'d, M: Mode> Channel<'d, M> {
 
         Ok(Transfer {
             channel: self.reborrow(),
+            reload: false,
         })
     }
 
@@ -1220,6 +1222,7 @@ impl<'d, M: Mode> Channel<'d, M> {
 #[must_use = "a DMA transfer stops when dropped"]
 pub struct Transfer<'a, M: Mode> {
     channel: Channel<'a, M>,
+    reload: bool,
 }
 
 impl<'a, M: Mode> Transfer<'a, M> {
@@ -1235,7 +1238,8 @@ impl<'a, M: Mode> Transfer<'a, M> {
     /// Wait synchronously for completion.
     ///
     /// With automatic reload enabled, completion means the first block has
-    /// completed. Dropping `self` then stops the repeating transfer.
+    /// completed; this method then stops the repeating transfer before
+    /// returning so the borrowed buffers are safe to release.
     pub fn blocking_wait(self) -> Result<(), Error> {
         compiler_fence(Ordering::SeqCst);
         let result = loop {
@@ -1244,9 +1248,14 @@ impl<'a, M: Mode> Transfer<'a, M> {
             }
         };
         compiler_fence(Ordering::SeqCst);
-        // The transfer completed; forget instead of dropping so `Drop::abort`
-        // does not re-mask interrupts and clear flags on a finished channel.
-        core::mem::forget(self);
+        if !self.reload {
+            // A non-reloading channel disables itself on completion. Forget
+            // instead of dropping so `Drop::abort` does not re-mask interrupts
+            // and clear flags on a finished channel.
+            core::mem::forget(self);
+        }
+        // For reloading transfers, `self` drops here and `Drop::abort` stops
+        // the still-running channel before the borrow ends.
         result
     }
 
