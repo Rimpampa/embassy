@@ -357,8 +357,8 @@ impl<'d, M: Mode> Spi<'d, M> {
     ) -> Result<Self, ConfigError> {
         let info = T::info();
 
-        let _ = rcc::enable_peripheral(info.peripheral);
-        let _ = rcc::reset_peripheral(info.peripheral);
+        rcc::enable_peripheral(info.peripheral).map_err(ConfigError::Rcc)?;
+        rcc::reset_peripheral(info.peripheral).map_err(ConfigError::Rcc)?;
 
         let mut spi = Self {
             info,
@@ -996,7 +996,7 @@ impl<'d> Spi<'d, Async> {
             .await
             .map_err(Error::Dma)?;
 
-        while self.busy() {}
+        self.flush_async().await?;
         self.drain_rx();
         self.take_error()
     }
@@ -1056,7 +1056,7 @@ impl<'d> Spi<'d, Async> {
         rx_res.map_err(Error::Dma)?;
 
         if tx_len > rx_len {
-            while self.busy() {}
+            self.flush_async().await?;
             self.drain_rx();
         }
         self.take_error()
