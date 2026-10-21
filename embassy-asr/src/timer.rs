@@ -19,6 +19,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::Poll;
 
+use embassy_hal_internal::impl_peripheral;
 use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_sync::waitqueue::AtomicWaker;
 
@@ -101,12 +102,38 @@ pub enum Ch2 {}
 /// Channel 3 marker.
 pub enum Ch3 {}
 
+enum Pclk {
+    Pclk0,
+    Pclk1,
+}
+
+struct Info {
+    regs: *const pac::gptim0::RegisterBlock,
+    peripheral: RccPeripheral,
+    interrupt: pac::Interrupt,
+    index: usize,
+    pclk: Pclk,
+}
+
+impl Info {
+    #[inline]
+    fn regs(&self) -> &'static pac::gptim0::RegisterBlock {
+        unsafe { &*self.regs }
+    }
+
+    fn kernel_clock_hz(&self) -> Option<u32> {
+        rcc::clocks().map(|c| match self.pclk {
+            Pclk::Pclk0 => c.pclk0_hz,
+            Pclk::Pclk1 => c.pclk1_hz,
+        })
+    }
+}
+
+// SAFETY: `Info` only contains read-only register addresses and instance data.
+unsafe impl Sync for Info {}
+
 trait SealedInstance {
-    fn regs() -> &'static pac::gptim0::RegisterBlock;
-    fn rcc_peripheral() -> RccPeripheral;
-    fn nv_interrupt() -> pac::Interrupt;
-    const INDEX: usize;
-    fn kernel_clock_hz() -> Option<u32>;
+    fn info() -> &'static Info;
 }
 
 trait SealedTimerChannel {}
@@ -175,11 +202,11 @@ pub enum OutputPolarity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum CapturePolarity {
-    /// Capture on  rising edge.
+    /// Capture on rising edge.
     Rising,
-    /// Capture on  falling edge.
+    /// Capture on falling edge.
     Falling,
-    /// Capture on a both edges.
+    /// Capture on both edges.
     Both,
 }
 
@@ -217,7 +244,6 @@ impl InterruptFlags {
         self.0 & SR_IT_MASK
     }
 
-    /// Whether every bit in `other` is present.
     /// Whether every bit in `other` is present.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -308,33 +334,36 @@ impl Default for PwmConfig {
 
 /// GPTimer peripheral instance.
 #[allow(private_bounds)]
-pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
+pub trait Instance: SealedInstance + PeripheralType + Into<AnyTimer> + 'static + Send {
     /// NVIC vector for this instance.
     type Interrupt: TypelevelInterrupt;
 }
 
+/// Type-erased GPTimer token.
+pub struct AnyTimer {
+    _private: (),
+}
+
+impl_peripheral!(AnyTimer);
+
 macro_rules! impl_timer {
-    ($name:ident, $pac:ident, $rcc:ident, $irq:ident, $index:expr, $clock:ident) => {
+    ($name:ident, $pac:ident, $rcc:ident, $irq:ident, $index:expr, $pclk:ident) => {
         impl SealedInstance for peripherals::$name {
-            #[inline]
-            fn regs() -> &'static pac::gptim0::RegisterBlock {
-                unsafe { &*pac::$pac::ptr() }
+            fn info() -> &'static Info {
+                static INFO: Info = Info {
+                    regs: pac::$pac::PTR,
+                    peripheral: RccPeripheral::$rcc,
+                    interrupt: pac::Interrupt::$irq,
+                    index: $index,
+                    pclk: Pclk::$pclk,
+                };
+                &INFO
             }
+        }
 
-            #[inline]
-            fn rcc_peripheral() -> RccPeripheral {
-                RccPeripheral::$rcc
-            }
-
-            #[inline]
-            fn nv_interrupt() -> pac::Interrupt {
-                pac::Interrupt::$irq
-            }
-
-            const INDEX: usize = $index;
-
-            fn kernel_clock_hz() -> Option<u32> {
-                rcc::clocks().map(|c| c.$clock)
+        impl From<peripherals::$name> for AnyTimer {
+            fn from(_: peripherals::$name) -> Self {
+                Self { _private: () }
             }
         }
 
@@ -345,10 +374,10 @@ macro_rules! impl_timer {
 }
 
 // TIMER0/2 sit on the 0x4000_xxxx bus (PCLK0); TIMER1/3 on 0x4001_xxxx (PCLK1).
-impl_timer!(TIMER0, Gptim0, Timer0, GPTIM0, 0, pclk0_hz);
-impl_timer!(TIMER1, Gptim1, Timer1, GPTIM1, 1, pclk1_hz);
-impl_timer!(TIMER2, Gptim2, Timer2, GPTIM2, 2, pclk0_hz);
-impl_timer!(TIMER3, Gptim3, Timer3, GPTIM3, 3, pclk1_hz);
+impl_timer!(TIMER0, Gptim0, Timer0, GPTIM0, 0, Pclk0);
+impl_timer!(TIMER1, Gptim1, Timer1, GPTIM1, 1, Pclk1);
+impl_timer!(TIMER2, Gptim2, Timer2, GPTIM2, 2, Pclk0);
+impl_timer!(TIMER3, Gptim3, Timer3, GPTIM3, 3, Pclk1);
 
 /// Interrupt handler for one GPTimer instance.
 ///
@@ -360,7 +389,8 @@ pub struct InterruptHandler<T: Instance> {
 
 impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
-        let regs = T::regs();
+        let info = T::info();
+        let regs = info.regs();
         let sr = regs.sr().read().bits();
         let dier = regs.dier().read().bits();
         let pending = sr & dier & SR_IT_MASK;
@@ -375,22 +405,22 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
             regs.sr().write_with_zero(|w| w.bits(!pending));
         }
 
-        PENDING[T::INDEX].fetch_or(pending, Ordering::Release);
-        WAKERS[T::INDEX].wake();
+        PENDING[info.index].fetch_or(pending, Ordering::Release);
+        WAKERS[info.index].wake();
     }
 }
 
-fn enable_instance<T: Instance>() -> Result<(), ConfigError> {
-    rcc::enable_peripheral(T::rcc_peripheral())?;
-    rcc::reset_peripheral(T::rcc_peripheral())?;
-    T::nv_interrupt().disable();
-    T::nv_interrupt().unpend();
-    PENDING[T::INDEX].store(0, Ordering::Release);
+fn enable_instance(info: &'static Info) -> Result<(), ConfigError> {
+    rcc::enable_peripheral(info.peripheral)?;
+    rcc::reset_peripheral(info.peripheral)?;
+    info.interrupt.disable();
+    info.interrupt.unpend();
+    PENDING[info.index].store(0, Ordering::Release);
     Ok(())
 }
 
-fn apply_basic_config<T: Instance>(config: Config) {
-    let regs = T::regs();
+fn apply_basic_config(info: &'static Info, config: Config) {
+    let regs = info.regs();
     regs.cr1().modify(|_, w| {
         w.dir().clear_bit();
         w.cms().edge_aligned();
@@ -413,13 +443,13 @@ fn apply_basic_config<T: Instance>(config: Config) {
     }
 }
 
-fn set_enabled<T: Instance>(enabled: bool) {
-    T::regs().cr1().modify(|_, w| w.cen().bit(enabled));
+fn set_enabled(info: &'static Info, enabled: bool) {
+    info.regs().cr1().modify(|_, w| w.cen().bit(enabled));
 }
 
-fn set_interrupt_enabled<T: Instance>(flags: InterruptFlags, enabled: bool) {
+fn set_interrupt_enabled(info: &'static Info, flags: InterruptFlags, enabled: bool) {
     let mask = flags.bits() & DIER_IT_MASK;
-    let regs = T::regs();
+    let regs = info.regs();
     regs.dier().modify(|r, w| {
         let bits = if enabled { r.bits() | mask } else { r.bits() & !mask };
         unsafe { w.bits(bits) }
@@ -433,37 +463,37 @@ fn set_interrupt_enabled<T: Instance>(flags: InterruptFlags, enabled: bool) {
         || dier.cc3ie().bit_is_set()
         || dier.tie().bit_is_set();
     if any_enabled {
-        T::nv_interrupt().unpend();
-        unsafe { T::nv_interrupt().enable() };
+        info.interrupt.unpend();
+        unsafe { info.interrupt.enable() };
     } else {
-        T::nv_interrupt().disable();
+        info.interrupt.disable();
     }
 }
 
-fn clear_interrupt<T: Instance>(flags: InterruptFlags) {
+fn clear_interrupt(info: &'static Info, flags: InterruptFlags) {
     let mask = flags.bits();
     // SR has field accessors (uif, cc0if, etc.) but we clear by raw mask
     // to match the vendor `timer_clear_status` sequence.
     unsafe {
-        T::regs().sr().write_with_zero(|w| w.bits(!mask));
+        info.regs().sr().write_with_zero(|w| w.bits(!mask));
     }
-    PENDING[T::INDEX].fetch_and(!mask, Ordering::AcqRel);
+    PENDING[info.index].fetch_and(!mask, Ordering::AcqRel);
 }
 
-async fn wait_for_flags<T: Instance>(flags: InterruptFlags) -> InterruptFlags {
+async fn wait_for_flags(info: &'static Info, flags: InterruptFlags) -> InterruptFlags {
     let mask = flags.bits();
     poll_fn(|cx| {
-        WAKERS[T::INDEX].register(cx.waker());
+        WAKERS[info.index].register(cx.waker());
 
-        let latched = PENDING[T::INDEX].load(Ordering::Acquire) & mask;
+        let latched = PENDING[info.index].load(Ordering::Acquire) & mask;
         if latched != 0 {
-            PENDING[T::INDEX].fetch_and(!latched, Ordering::AcqRel);
+            PENDING[info.index].fetch_and(!latched, Ordering::AcqRel);
             return Poll::Ready(InterruptFlags(latched));
         }
 
-        let live = T::regs().sr().read().bits() & mask;
+        let live = info.regs().sr().read().bits() & mask;
         if live != 0 {
-            clear_interrupt::<T>(InterruptFlags(live));
+            clear_interrupt(info, InterruptFlags(live));
             return Poll::Ready(InterruptFlags(live));
         }
 
@@ -506,8 +536,8 @@ fn compute_psc_arr(pclk: u32, frequency: Hertz) -> Result<(u16, u16), ConfigErro
 }
 
 // PAC field accessors are used directly in each method below.
-fn set_channel_enable<T: Instance>(channel: Channel, enabled: bool) {
-    let regs = T::regs();
+fn set_channel_enable(info: &'static Info, channel: Channel, enabled: bool) {
+    let regs = info.regs();
     match channel {
         Channel::Ch0 => {
             regs.ccer().modify(|_, w| {
@@ -536,8 +566,8 @@ fn set_channel_enable<T: Instance>(channel: Channel, enabled: bool) {
     }
 }
 
-fn channel_enabled<T: Instance>(channel: Channel) -> bool {
-    let regs = T::regs();
+fn channel_enabled(info: &'static Info, channel: Channel) -> bool {
+    let regs = info.regs();
     match channel {
         Channel::Ch0 => regs.ccer().read().cc0e().bit_is_set(),
         Channel::Ch1 => regs.ccer().read().cc1e().bit_is_set(),
@@ -546,8 +576,8 @@ fn channel_enabled<T: Instance>(channel: Channel) -> bool {
     }
 }
 
-fn set_compare<T: Instance>(channel: Channel, value: u16) {
-    let regs = T::regs();
+fn set_compare(info: &'static Info, channel: Channel, value: u16) {
+    let regs = info.regs();
     unsafe {
         match channel {
             Channel::Ch0 => regs.ccr0().write_with_zero(|w| w.ccr0().bits(value)),
@@ -558,8 +588,8 @@ fn set_compare<T: Instance>(channel: Channel, value: u16) {
     }
 }
 
-fn get_compare<T: Instance>(channel: Channel) -> u16 {
-    let regs = T::regs();
+fn get_compare(info: &'static Info, channel: Channel) -> u16 {
+    let regs = info.regs();
     match channel {
         Channel::Ch0 => regs.ccr0().read().ccr0().bits(),
         Channel::Ch1 => regs.ccr1().read().ccr1().bits(),
@@ -610,15 +640,15 @@ fn set_output_preload(regs: &pac::gptim0::RegisterBlock, channel: Channel) {
     };
 }
 
-fn configure_pwm_channel<T: Instance>(channel: Channel, pwm: PwmConfig, duty: u16) {
-    let regs = T::regs();
+fn configure_pwm_channel(info: &'static Info, channel: Channel, pwm: PwmConfig, duty: u16) {
+    let regs = info.regs();
 
     // Disable channel while reconfiguring (vendor `timer_config_oc`).
-    set_channel_enable::<T>(channel, false);
+    set_channel_enable(info, channel, false);
     set_pwm_mode(regs, channel, pwm.mode);
     set_output_preload(regs, channel);
 
-    set_compare::<T>(channel, duty);
+    set_compare(info, channel, duty);
 
     match channel {
         Channel::Ch0 => {
@@ -656,11 +686,11 @@ fn configure_pwm_channel<T: Instance>(channel: Channel, pwm: PwmConfig, duty: u1
     }
 }
 
-fn configure_capture_channel<T: Instance>(channel: Channel, polarity: CapturePolarity) {
-    let regs = T::regs();
+fn configure_capture_channel(info: &'static Info, channel: Channel, polarity: CapturePolarity) {
+    let regs = info.regs();
 
     // Disable channel while reconfiguring.
-    set_channel_enable::<T>(channel, false);
+    set_channel_enable(info, channel, false);
 
     // Select input mapping through accessors and zero the output-mode
     // field; the IC-filter bits have no PAC accessor and are cleared raw.
@@ -701,7 +731,7 @@ fn configure_capture_channel<T: Instance>(channel: Channel, polarity: CapturePol
         }
     }
 
-    let regs = T::regs();
+    let regs = info.regs();
     match channel {
         Channel::Ch0 => {
             regs.ccer().modify(|_, w| {
@@ -787,16 +817,17 @@ fn configure_input_af<'d>(pin: Peri<'d, impl GpioPin>, af: AlternateFunction) ->
 }
 
 /// Owned general-purpose timer in basic up-counting mode.
-pub struct Timer<'d, T: Instance> {
-    _peri: Peri<'d, T>,
+pub struct Timer<'d> {
+    _peri: Peri<'d, AnyTimer>,
+    info: &'static Info,
 }
 
-impl<'d, T: Instance> Timer<'d, T> {
+impl<'d> Timer<'d> {
     /// Enable clocks, reset the block, apply `config`, and leave the counter stopped.
     ///
     /// Does not bind the update interrupt; use [`Self::new`] for
     /// interrupt-driven use.
-    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
+    pub fn new_blocking<T: Instance>(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
         Self::create(peri, config)
     }
 
@@ -804,7 +835,7 @@ impl<'d, T: Instance> Timer<'d, T> {
     ///
     /// `irq` proves the timer update vector is bound; interrupt-driven
     /// waits arm it on demand.
-    pub fn new(
+    pub fn new<T: Instance>(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
@@ -812,54 +843,59 @@ impl<'d, T: Instance> Timer<'d, T> {
         Self::create(peri, config)
     }
 
-    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
-        enable_instance::<T>()?;
-        let this = Self { _peri: peri };
-        apply_basic_config::<T>(config);
+    fn create<T: Instance>(peri: Peri<'d, T>, config: Config) -> Result<Self, ConfigError> {
+        let info = T::info();
+        enable_instance(info)?;
+        let this = Self {
+            _peri: peri.into(),
+            info,
+        };
+        apply_basic_config(info, config);
         Ok(this)
     }
 
     /// Re-apply basic timer configuration while the counter is stopped.
     pub fn configure(&mut self, config: Config) {
-        set_enabled::<T>(false);
-        apply_basic_config::<T>(config);
+        set_enabled(self.info, false);
+        apply_basic_config(self.info, config);
     }
 
     /// Start or stop the counter (`CR1.CEN`).
     pub fn set_enabled(&mut self, enabled: bool) {
-        set_enabled::<T>(enabled);
+        set_enabled(self.info, enabled);
     }
 
     /// Whether the counter is enabled.
     pub fn is_enabled(&self) -> bool {
-        T::regs().cr1().read().cen().bit_is_set()
+        self.info.regs().cr1().read().cen().bit_is_set()
     }
 
     /// Current counter value.
     pub fn counter(&self) -> u16 {
-        T::regs().cnt().read().cnt().bits()
+        self.info.regs().cnt().read().cnt().bits()
     }
 
     /// Auto-reload period (`ARR`).
     pub fn period(&self) -> u16 {
-        T::regs().arr().read().arr().bits()
+        self.info.regs().arr().read().arr().bits()
     }
 
     /// Set the auto-reload period.
     pub fn set_period(&mut self, period: u16) {
         unsafe {
-            T::regs().arr().write_with_zero(|w| w.arr().bits(period));
+            self.info.regs().arr().write_with_zero(|w| w.arr().bits(period));
         }
     }
 
     /// Prescaler (`PSC`).
     pub fn prescaler(&self) -> u16 {
-        T::regs().psc().read().psc().bits()
+        self.info.regs().psc().read().psc().bits()
     }
 
     /// Kernel clock frequency in hertz.
     pub fn clock_hz(&self) -> Result<u32, ConfigError> {
-        T::kernel_clock_hz()
+        self.info
+            .kernel_clock_hz()
             .filter(|&hz| hz != 0)
             .ok_or(ConfigError::ClockUnavailable)
     }
@@ -872,17 +908,17 @@ impl<'d, T: Instance> Timer<'d, T> {
 
     /// Enable or disable interrupt sources and unmask the NVIC when any are set.
     pub fn set_interrupt_enabled(&mut self, flags: InterruptFlags, enabled: bool) {
-        set_interrupt_enabled::<T>(flags, enabled);
+        set_interrupt_enabled(self.info, flags, enabled);
     }
 
     /// Clear status flags (vendor `timer_clear_status`).
     pub fn clear_interrupt(&mut self, flags: InterruptFlags) {
-        clear_interrupt::<T>(flags);
+        clear_interrupt(self.info, flags);
     }
 
     /// Raw pending `SR` bits masked to the interrupt set.
     pub fn interrupt_status(&self) -> InterruptFlags {
-        InterruptFlags(T::regs().sr().read().bits() & SR_IT_MASK)
+        InterruptFlags(self.info.regs().sr().read().bits() & SR_IT_MASK)
     }
 
     /// Wait until any of `flags` is reported by [`InterruptHandler`].
@@ -891,11 +927,11 @@ impl<'d, T: Instance> Timer<'d, T> {
             return InterruptFlags::empty();
         }
         self.set_interrupt_enabled(flags, true);
-        wait_for_flags::<T>(flags).await
+        wait_for_flags(self.info, flags).await
     }
 }
 
-impl<'d, T: Instance> embassy_embedded_hal::SetConfig for Timer<'d, T> {
+impl<'d> embassy_embedded_hal::SetConfig for Timer<'d> {
     type Config = Config;
     type ConfigError = core::convert::Infallible;
 
@@ -905,11 +941,11 @@ impl<'d, T: Instance> embassy_embedded_hal::SetConfig for Timer<'d, T> {
     }
 }
 
-impl<'d, T: Instance> Drop for Timer<'d, T> {
+impl<'d> Drop for Timer<'d> {
     fn drop(&mut self) {
-        T::nv_interrupt().disable();
-        set_enabled::<T>(false);
-        let _ = rcc::disable_peripheral(T::rcc_peripheral());
+        self.info.interrupt.disable();
+        set_enabled(self.info, false);
+        let _ = rcc::disable_peripheral(self.info.peripheral);
     }
 }
 
@@ -962,26 +998,27 @@ impl<'d, T: Instance, C: TimerChannel> CapturePin<'d, T, C> {
 }
 
 /// One PWM channel obtained from [`SimplePwm::channel`].
-pub struct SimplePwmChannel<'a, T: Instance> {
+pub struct SimplePwmChannel<'a> {
+    info: &'static Info,
     channel: Channel,
     max_duty: u16,
-    _phantom: PhantomData<&'a mut T>,
+    _phantom: PhantomData<&'a mut ()>,
 }
 
-impl<'a, T: Instance> SimplePwmChannel<'a, T> {
+impl<'a> SimplePwmChannel<'a> {
     /// Enable the channel output.
     pub fn enable(&mut self) {
-        set_channel_enable::<T>(self.channel, true);
+        set_channel_enable(self.info, self.channel, true);
     }
 
     /// Disable the channel output.
     pub fn disable(&mut self) {
-        set_channel_enable::<T>(self.channel, false);
+        set_channel_enable(self.info, self.channel, false);
     }
 
     /// Whether the channel output is enabled.
     pub fn is_enabled(&self) -> bool {
-        channel_enabled::<T>(self.channel)
+        channel_enabled(self.info, self.channel)
     }
 
     /// Maximum duty cycle (`ARR + 1`).
@@ -1001,20 +1038,20 @@ impl<'a, T: Instance> SimplePwmChannel<'a, T> {
         } else {
             duty
         };
-        set_compare::<T>(self.channel, value);
+        set_compare(self.info, self.channel, value);
     }
 
     /// Current compare value.
     pub fn get_duty_cycle(&self) -> u16 {
-        get_compare::<T>(self.channel)
+        get_compare(self.info, self.channel)
     }
 }
 
-impl<'a, T: Instance> embedded_hal::pwm::ErrorType for SimplePwmChannel<'a, T> {
+impl embedded_hal::pwm::ErrorType for SimplePwmChannel<'_> {
     type Error = core::convert::Infallible;
 }
 
-impl<'a, T: Instance> embedded_hal::pwm::SetDutyCycle for SimplePwmChannel<'a, T> {
+impl embedded_hal::pwm::SetDutyCycle for SimplePwmChannel<'_> {
     fn max_duty_cycle(&self) -> u16 {
         SimplePwmChannel::max_duty_cycle(self)
     }
@@ -1026,18 +1063,19 @@ impl<'a, T: Instance> embedded_hal::pwm::SetDutyCycle for SimplePwmChannel<'a, T
 }
 
 /// Simple up-counting PWM driver for one GPTimer.
-pub struct SimplePwm<'d, T: Instance> {
-    _peri: Peri<'d, T>,
+pub struct SimplePwm<'d> {
+    _peri: Peri<'d, AnyTimer>,
+    info: &'static Info,
     _ch0: Option<Flex<'d>>,
     _ch1: Option<Flex<'d>>,
     _ch2: Option<Flex<'d>>,
     _ch3: Option<Flex<'d>>,
 }
 
-impl<'d, T: Instance> SimplePwm<'d, T> {
+impl<'d> SimplePwm<'d> {
     /// Create a PWM timer at `frequency`, optionally attaching channel pins.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<T: Instance>(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         ch0: Option<PwmPin<'d, T, Ch0>>,
@@ -1047,22 +1085,28 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         frequency: Hertz,
         pwm: PwmConfig,
     ) -> Result<Self, ConfigError> {
-        enable_instance::<T>()?;
+        let info = T::info();
+        enable_instance(info)?;
 
-        let pclk = T::kernel_clock_hz()
+        let pclk = info
+            .kernel_clock_hz()
             .filter(|&hz| hz != 0)
             .ok_or(ConfigError::ClockUnavailable)?;
         let (prescaler, period) = compute_psc_arr(pclk, frequency)?;
 
-        apply_basic_config::<T>(Config {
-            prescaler,
-            period,
-            clock_division: ClockDivision::Div1,
-            autoreload_preload: pwm.autoreload_preload,
-        });
+        apply_basic_config(
+            info,
+            Config {
+                prescaler,
+                period,
+                clock_division: ClockDivision::Div1,
+                autoreload_preload: pwm.autoreload_preload,
+            },
+        );
 
         let this = Self {
-            _peri: peri,
+            _peri: peri.into(),
+            info,
             _ch0: ch0.map(|p| p.pin),
             _ch1: ch1.map(|p| p.pin),
             _ch2: ch2.map(|p| p.pin),
@@ -1070,40 +1114,43 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         };
 
         if this._ch0.is_some() {
-            configure_pwm_channel::<T>(Channel::Ch0, pwm, 0);
+            configure_pwm_channel(info, Channel::Ch0, pwm, 0);
         }
         if this._ch1.is_some() {
-            configure_pwm_channel::<T>(Channel::Ch1, pwm, 0);
+            configure_pwm_channel(info, Channel::Ch1, pwm, 0);
         }
         if this._ch2.is_some() {
-            configure_pwm_channel::<T>(Channel::Ch2, pwm, 0);
+            configure_pwm_channel(info, Channel::Ch2, pwm, 0);
         }
         if this._ch3.is_some() {
-            configure_pwm_channel::<T>(Channel::Ch3, pwm, 0);
+            configure_pwm_channel(info, Channel::Ch3, pwm, 0);
         }
 
-        set_enabled::<T>(true);
+        set_enabled(info, true);
         Ok(this)
     }
 
     /// Maximum duty cycle (`ARR + 1`).
     pub fn max_duty_cycle(&self) -> u16 {
-        T::regs().arr().read().arr().bits().saturating_add(1)
+        self.info.regs().arr().read().arr().bits().saturating_add(1)
     }
 
     /// Output frequency programmed into PSC/ARR.
     pub fn frequency_hz(&self) -> Result<u32, ConfigError> {
-        let pclk = T::kernel_clock_hz()
+        let pclk = self
+            .info
+            .kernel_clock_hz()
             .filter(|&hz| hz != 0)
             .ok_or(ConfigError::ClockUnavailable)?;
-        let psc = u32::from(T::regs().psc().read().psc().bits()) + 1;
-        let arr = u32::from(T::regs().arr().read().arr().bits()) + 1;
+        let psc = u32::from(self.info.regs().psc().read().psc().bits()) + 1;
+        let arr = u32::from(self.info.regs().arr().read().arr().bits()) + 1;
         Ok(pclk / psc / arr)
     }
 
     /// Borrow a channel for duty-cycle control.
-    pub fn channel(&mut self, channel: Channel) -> SimplePwmChannel<'_, T> {
+    pub fn channel(&mut self, channel: Channel) -> SimplePwmChannel<'_> {
         SimplePwmChannel {
+            info: self.info,
             channel,
             max_duty: self.max_duty_cycle(),
             _phantom: PhantomData,
@@ -1111,33 +1158,33 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
     }
 
     /// Borrow channel 0.
-    pub fn ch0(&mut self) -> SimplePwmChannel<'_, T> {
+    pub fn ch0(&mut self) -> SimplePwmChannel<'_> {
         self.channel(Channel::Ch0)
     }
 
     /// Borrow channel 1.
-    pub fn ch1(&mut self) -> SimplePwmChannel<'_, T> {
+    pub fn ch1(&mut self) -> SimplePwmChannel<'_> {
         self.channel(Channel::Ch1)
     }
 
     /// Borrow channel 2.
-    pub fn ch2(&mut self) -> SimplePwmChannel<'_, T> {
+    pub fn ch2(&mut self) -> SimplePwmChannel<'_> {
         self.channel(Channel::Ch2)
     }
 
     /// Borrow channel 3.
-    pub fn ch3(&mut self) -> SimplePwmChannel<'_, T> {
+    pub fn ch3(&mut self) -> SimplePwmChannel<'_> {
         self.channel(Channel::Ch3)
     }
 
     /// Enable or disable interrupt sources.
     pub fn set_interrupt_enabled(&mut self, flags: InterruptFlags, enabled: bool) {
-        set_interrupt_enabled::<T>(flags, enabled);
+        set_interrupt_enabled(self.info, flags, enabled);
     }
 
     /// Clear status flags.
     pub fn clear_interrupt(&mut self, flags: InterruptFlags) {
-        clear_interrupt::<T>(flags);
+        clear_interrupt(self.info, flags);
     }
 
     /// Wait until any of `flags` is reported by [`InterruptHandler`].
@@ -1146,46 +1193,49 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
             return InterruptFlags::empty();
         }
         self.set_interrupt_enabled(flags, true);
-        wait_for_flags::<T>(flags).await
+        wait_for_flags(self.info, flags).await
     }
 
     /// Start or stop the counter.
     pub fn set_enabled(&mut self, enabled: bool) {
-        set_enabled::<T>(enabled);
+        set_enabled(self.info, enabled);
     }
 }
 
-impl<'d, T: Instance> Drop for SimplePwm<'d, T> {
+impl<'d> Drop for SimplePwm<'d> {
     fn drop(&mut self) {
-        T::nv_interrupt().disable();
-        set_enabled::<T>(false);
-        let _ = rcc::disable_peripheral(T::rcc_peripheral());
+        self.info.interrupt.disable();
+        set_enabled(self.info, false);
+        let _ = rcc::disable_peripheral(self.info.peripheral);
     }
 }
 
 /// Input-capture driver for a single channel.
-pub struct InputCapture<'d, T: Instance> {
-    _peri: Peri<'d, T>,
+pub struct InputCapture<'d> {
+    _peri: Peri<'d, AnyTimer>,
+    info: &'static Info,
     _pin: Flex<'d>,
     channel: Channel,
 }
 
-impl<'d, T: Instance> InputCapture<'d, T> {
+impl<'d> InputCapture<'d> {
     /// Configure up-counting capture on one channel.
-    pub fn new<C: TimerChannel>(
+    pub fn new<T: Instance, C: TimerChannel>(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         pin: CapturePin<'d, T, C>,
         config: Config,
         polarity: CapturePolarity,
     ) -> Result<Self, ConfigError> {
-        enable_instance::<T>()?;
-        apply_basic_config::<T>(config);
-        configure_capture_channel::<T>(C::CHANNEL, polarity);
-        set_enabled::<T>(true);
+        let info = T::info();
+        enable_instance(info)?;
+        apply_basic_config(info, config);
+        configure_capture_channel(info, C::CHANNEL, polarity);
+        set_enabled(info, true);
 
         Ok(Self {
-            _peri: peri,
+            _peri: peri.into(),
+            info,
             _pin: pin.pin,
             channel: C::CHANNEL,
         })
@@ -1198,28 +1248,28 @@ impl<'d, T: Instance> InputCapture<'d, T> {
 
     /// Latest captured counter value (`CCR`).
     pub fn capture(&self) -> u16 {
-        get_compare::<T>(self.channel)
+        get_compare(self.info, self.channel)
     }
 
     /// Current free-running counter.
     pub fn counter(&self) -> u16 {
-        T::regs().cnt().read().cnt().bits()
+        self.info.regs().cnt().read().cnt().bits()
     }
 
     /// Enable or disable the capture interrupt for this channel.
     pub fn set_interrupt_enabled(&mut self, enabled: bool) {
-        set_interrupt_enabled::<T>(InterruptFlags::cc(self.channel), enabled);
+        set_interrupt_enabled(self.info, InterruptFlags::cc(self.channel), enabled);
     }
 
     /// Clear the capture flag for this channel.
     pub fn clear_interrupt(&mut self) {
-        clear_interrupt::<T>(InterruptFlags::cc(self.channel));
+        clear_interrupt(self.info, InterruptFlags::cc(self.channel));
     }
 
     /// Wait for the next capture event on this channel.
     pub async fn wait_for_capture(&mut self) -> u16 {
         self.set_interrupt_enabled(true);
-        let _ = wait_for_flags::<T>(InterruptFlags::cc(self.channel)).await;
+        let _ = wait_for_flags(self.info, InterruptFlags::cc(self.channel)).await;
         self.capture()
     }
 
@@ -1228,21 +1278,21 @@ impl<'d, T: Instance> InputCapture<'d, T> {
         if flags.bits() == 0 {
             return InterruptFlags::empty();
         }
-        set_interrupt_enabled::<T>(flags, true);
-        wait_for_flags::<T>(flags).await
+        set_interrupt_enabled(self.info, flags, true);
+        wait_for_flags(self.info, flags).await
     }
 
     /// Start or stop the counter.
     pub fn set_enabled(&mut self, enabled: bool) {
-        set_enabled::<T>(enabled);
+        set_enabled(self.info, enabled);
     }
 }
 
-impl<'d, T: Instance> Drop for InputCapture<'d, T> {
+impl<'d> Drop for InputCapture<'d> {
     fn drop(&mut self) {
-        T::nv_interrupt().disable();
-        set_enabled::<T>(false);
-        let _ = rcc::disable_peripheral(T::rcc_peripheral());
+        self.info.interrupt.disable();
+        set_enabled(self.info, false);
+        let _ = rcc::disable_peripheral(self.info.peripheral);
     }
 }
 
