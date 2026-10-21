@@ -511,7 +511,7 @@ fn enable_clock(source: ClockSource) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn apply_config(regs: &RegisterBlock, config: &Config) -> Result<(), ConfigError> {
+fn apply_config(regs: &RegisterBlock, config: &Config, has_rx: bool, has_tx: bool) -> Result<(), ConfigError> {
     let (ibaud, fbaud) = calc_baud(config.clock_source.frequency_hz(), config.baudrate).ok_or(ConfigError::Baudrate)?;
 
     let data_len = match config.data_bits {
@@ -563,6 +563,11 @@ fn apply_config(regs: &RegisterBlock, config: &Config) -> Result<(), ConfigError
         wait_cr0_writable(regs);
     }
     regs.cr1().modify(|_, w| w.cts_enable().bit(cts));
+
+    // The full CR0 write above clears RX_ENABLE. Restore the directions that
+    // were actually configured on this driver.
+    set_tx_enable(regs, has_tx);
+    set_rx_enable(regs, has_rx);
 
     Ok(())
 }
@@ -670,6 +675,8 @@ pub struct Lpuart<'d, M: Mode> {
 /// Transmit half of an LPUART.
 pub struct LpuartTx<'d, M: Mode> {
     info: &'static Info,
+    has_tx: bool,
+    has_rx: bool,
     // `Flex` (not bare `Peri`) so dropping the half deconfigures the pins
     // back to analog via `Flex::drop`.
     _pin: Option<Flex<'d>>,
@@ -680,6 +687,8 @@ pub struct LpuartTx<'d, M: Mode> {
 /// Receive half of an LPUART.
 pub struct LpuartRx<'d, M: Mode> {
     info: &'static Info,
+    has_tx: bool,
+    has_rx: bool,
     _pin: Option<Flex<'d>>,
     _cts: Option<Flex<'d>>,
     _mode: PhantomData<&'d mut M>,
@@ -828,21 +837,23 @@ impl<'d, M: Mode> Lpuart<'d, M> {
         let cts_pin = cts.map(|(p, af)| configure_pin(p, af, false));
 
         let regs = info.regs();
-        apply_config(regs, &config)?;
-        set_tx_enable(regs, has_tx);
-        set_rx_enable(regs, has_rx);
+        apply_config(regs, &config, has_rx, has_tx)?;
 
         info.state.refcount.store(2, Ordering::Release);
 
         Ok(Self {
             tx: LpuartTx {
                 info,
+                has_tx,
+                has_rx,
                 _pin: tx_pin,
                 _rts: rts_pin,
                 _mode: PhantomData,
             },
             rx: LpuartRx {
                 info,
+                has_tx,
+                has_rx,
                 _pin: rx_pin,
                 _cts: cts_pin,
                 _mode: PhantomData,
@@ -903,9 +914,9 @@ impl<'d, M: Mode> Lpuart<'d, M> {
     /// Reconfigure the LPUART with new settings.
     pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
         let info = self.tx.info;
+        enable_clock(config.clock_source)?;
         let regs = info.regs();
-        apply_config(regs, config)?;
-        Ok(())
+        apply_config(regs, config, self.tx.has_rx, self.tx.has_tx)
     }
 
     /// Change the baud rate, keeping all other settings.
@@ -928,6 +939,7 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
     /// Blocking write of the entire buffer.
     pub fn blocking_write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let regs = self.regs();
+        clear_tx_done(regs);
         for &byte in buffer {
             while !tx_empty(regs) {}
             write_data(regs, byte);
@@ -974,7 +986,8 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
 
     /// Reconfigure with new settings.
     pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        apply_config(self.regs(), config)
+        enable_clock(config.clock_source)?;
+        apply_config(self.regs(), config, self.has_rx, self.has_tx)
     }
 
     // No `send_break`: the LPUART register block exposes no break-transmit
@@ -1005,6 +1018,7 @@ impl<'d> LpuartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let info = self.info;
         let regs = info.regs();
+        clear_tx_done(regs);
         // If dropped mid-byte the TX interrupt would stay armed with no
         // waiter; disarm it.
         let irq_guard = OnDrop::new(|| set_tx_empty_interrupt(regs, false));
@@ -1088,7 +1102,8 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
 
     /// Reconfigure with new settings.
     pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        apply_config(self.regs(), config)
+        enable_clock(config.clock_source)?;
+        apply_config(self.regs(), config, self.has_rx, self.has_tx)
     }
 
     /// Blocking read that fills the entire buffer.
