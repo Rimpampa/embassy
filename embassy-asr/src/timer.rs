@@ -886,7 +886,11 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 
     /// Wait until any of `flags` is reported by [`InterruptHandler`].
-    pub async fn wait_for(&self, flags: InterruptFlags) -> InterruptFlags {
+    pub async fn wait_for(&mut self, flags: InterruptFlags) -> InterruptFlags {
+        if flags.bits() == 0 {
+            return InterruptFlags::empty();
+        }
+        self.set_interrupt_enabled(flags, true);
         wait_for_flags::<T>(flags).await
     }
 }
@@ -1127,7 +1131,11 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
     }
 
     /// Wait until any of `flags` is reported by [`InterruptHandler`].
-    pub async fn wait_for(&self, flags: InterruptFlags) -> InterruptFlags {
+    pub async fn wait_for(&mut self, flags: InterruptFlags) -> InterruptFlags {
+        if flags.bits() == 0 {
+            return InterruptFlags::empty();
+        }
+        self.set_interrupt_enabled(flags, true);
         wait_for_flags::<T>(flags).await
     }
 
@@ -1199,13 +1207,18 @@ impl<'d, T: Instance> InputCapture<'d, T> {
     }
 
     /// Wait for the next capture event on this channel.
-    pub async fn wait_for_capture(&self) -> u16 {
+    pub async fn wait_for_capture(&mut self) -> u16 {
+        self.set_interrupt_enabled(true);
         let _ = wait_for_flags::<T>(InterruptFlags::cc(self.channel)).await;
         self.capture()
     }
 
     /// Wait until any of `flags` is reported by [`InterruptHandler`].
-    pub async fn wait_for(&self, flags: InterruptFlags) -> InterruptFlags {
+    pub async fn wait_for(&mut self, flags: InterruptFlags) -> InterruptFlags {
+        if flags.bits() == 0 {
+            return InterruptFlags::empty();
+        }
+        set_interrupt_enabled::<T>(flags, true);
         wait_for_flags::<T>(flags).await
     }
 

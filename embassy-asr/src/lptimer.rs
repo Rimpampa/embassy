@@ -879,6 +879,10 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// software pending bits for `flags`.
     pub async fn wait_for(&mut self, flags: InterruptFlags) -> InterruptFlags {
         let mask = flags.bits();
+        if mask == 0 {
+            return InterruptFlags::empty();
+        }
+        self.set_interrupt_enabled(flags, true);
         poll_fn(|cx| {
             WAKERS[T::INDEX].register(cx.waker());
 
