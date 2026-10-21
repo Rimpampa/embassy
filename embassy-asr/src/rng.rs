@@ -2,7 +2,9 @@
 //!
 //! The vendor RNG implementation lives in the closed-source `libcrypto.a`.
 //! This driver reconstructs the documented register programming from
-//! `algorithm.h` / `rng.h` and the SDK example, and exposes [`rand_core::RngCore`].
+//! `algorithm.h` / `rng.h` and the SDK example, and exposes fallible inherent
+//! `try_*` methods plus the [`rand_core::RngCore`] wrapper (which panics on a
+//! clock failure rather than returning predictable zeros).
 
 use rand_core::RngCore;
 
@@ -147,16 +149,16 @@ impl Drop for Rng<'_> {
 
 impl RngCore for Rng<'_> {
     fn next_u32(&mut self) -> u32 {
-        self.try_next_u32().unwrap_or(0)
+        Rng::try_next_u32(self).expect("RNG clock failure")
     }
 
     fn next_u64(&mut self) -> u64 {
-        let lo = RngCore::next_u32(self) as u64;
-        let hi = RngCore::next_u32(self) as u64;
+        let lo = u64::from(Rng::try_next_u32(self).expect("RNG clock failure"));
+        let hi = u64::from(Rng::try_next_u32(self).expect("RNG clock failure"));
         lo | (hi << 32)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        let _ = self.try_fill_bytes(dest);
+        Rng::try_fill_bytes(self, dest).expect("RNG clock failure");
     }
 }
