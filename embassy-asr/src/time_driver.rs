@@ -221,11 +221,26 @@ impl LptimTimeDriver {
     }
 
     fn now_inner(&self) -> u64 {
-        // Called with interrupts masked to avoid tearing across overflow.
-        let period = self.period.load(Ordering::Relaxed);
-        let cnt = lptim().cnt().read().cnt().bits() as u16 as u64;
-        let pending = if lptim().isr().read().arrm().bit_is_set() { 1 } else { 0 };
-        ((period as u64 + pending as u64) << 16) | cnt
+        // Called with interrupts masked to avoid tearing across overflow. The
+        // counter itself can still wrap while we read it, so take two stable
+        // reads and make sure the overflow flag did not change meanwhile. This
+        // mirrors the STM32 LPTIM time driver.
+        loop {
+            let pending_before = lptim().isr().read().arrm().bit_is_set();
+            let mut cnt = lptim().cnt().read().cnt().bits();
+            loop {
+                let again = lptim().cnt().read().cnt().bits();
+                if again == cnt {
+                    break;
+                }
+                cnt = again;
+            }
+            let pending_after = lptim().isr().read().arrm().bit_is_set();
+            if pending_before == pending_after {
+                let period = self.period.load(Ordering::Relaxed) + pending_after as u32;
+                return ((period as u64) << 16) | u64::from(cnt);
+            }
+        }
     }
 
     fn set_alarm(&self, cs: CriticalSection, timestamp: u64) -> bool {
@@ -263,6 +278,11 @@ impl LptimTimeDriver {
         true
     }
 
+    /// Extend the 16-bit counter by one period.
+    ///
+    /// Hardware latches only one overflow flag, so an interrupt latency longer
+    /// than one full 2-second period loses elapsed time. Keep the time-driver
+    /// interrupt at a priority that cannot be blocked for that long.
     fn next_period(&self) {
         let period = self.period.load(Ordering::Relaxed) + 1;
         self.period.store(period, Ordering::Release);
@@ -287,33 +307,39 @@ impl LptimTimeDriver {
     }
 
     fn on_interrupt(&self) {
-        let pending = lptim().isr().read().bits() & lptim().ier().read().bits() & (ISR_ARRM | ISR_CMPM);
-        if pending == 0 {
-            return;
-        }
+        // Keep the flag clear, period increment, and alarm re-arm in one
+        // critical section. Otherwise a higher-priority interrupt calling
+        // `Instant::now()` between clearing ARRM and incrementing `period`
+        // could observe time going backwards by one 16-bit period.
+        critical_section::with(|cs| {
+            let pending = lptim().isr().read().bits() & lptim().ier().read().bits() & (ISR_ARRM | ISR_CMPM);
+            if pending == 0 {
+                return;
+            }
 
-        // Clear exactly the observed flags through per-flag ICR accessors.
-        unsafe {
-            lptim().icr().write_with_zero(|w| {
-                if pending & ISR_ARRM != 0 {
-                    w.arrmcf().set_bit();
-                }
-                if pending & ISR_CMPM != 0 {
-                    w.cmpmcf().set_bit();
-                }
-                w
-            })
-        };
-        if pending & (ISR_ARRM | ISR_CMPM) != 0 {
-            wait_csr(pending & (ISR_ARRM | ISR_CMPM));
-        }
+            // Clear exactly the observed flags through per-flag ICR accessors.
+            unsafe {
+                lptim().icr().write_with_zero(|w| {
+                    if pending & ISR_ARRM != 0 {
+                        w.arrmcf().set_bit();
+                    }
+                    if pending & ISR_CMPM != 0 {
+                        w.cmpmcf().set_bit();
+                    }
+                    w
+                })
+            };
+            if pending & (ISR_ARRM | ISR_CMPM) != 0 {
+                wait_csr(pending & (ISR_ARRM | ISR_CMPM));
+            }
 
-        if pending & ISR_ARRM != 0 {
-            self.next_period();
-        }
-        if pending & ISR_CMPM != 0 {
-            critical_section::with(|cs| self.trigger_alarm(cs));
-        }
+            if pending & ISR_ARRM != 0 {
+                self.next_period();
+            }
+            if pending & ISR_CMPM != 0 {
+                self.trigger_alarm(cs);
+            }
+        });
     }
 }
 
