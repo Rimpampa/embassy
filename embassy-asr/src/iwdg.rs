@@ -16,6 +16,14 @@ pub enum ConfigError {
     InvalidReload,
     /// Window value exceeds the 12-bit `WIN` field (`0..=0x0FFF`).
     InvalidWindow,
+    /// Enabling the IWDG clock failed.
+    Rcc(rcc::Error),
+}
+
+impl From<rcc::Error> for ConfigError {
+    fn from(value: rcc::Error) -> Self {
+        Self::Rcc(value)
+    }
 }
 
 impl core::fmt::Display for ConfigError {
@@ -23,6 +31,7 @@ impl core::fmt::Display for ConfigError {
         match self {
             Self::InvalidReload => f.write_str("IWDG reload out of range"),
             Self::InvalidWindow => f.write_str("IWDG window out of range"),
+            Self::Rcc(err) => write!(f, "IWDG RCC error: {err}"),
         }
     }
 }
@@ -98,7 +107,7 @@ impl<'d> IndependentWatchdog<'d> {
     /// watching: keep the handle alive (and keep petting) to avoid a reset.
     /// [`stop`](Self::stop) halts it; dropping the handle stops it as well.
     pub fn new(peri: Peri<'d, peripherals::IWDG>, config: Config) -> Result<Self, ConfigError> {
-        let _ = rcc::enable_peripheral(Peripheral::Iwdg);
+        rcc::enable_peripheral(Peripheral::Iwdg)?;
         let mut this = Self { _peri: peri };
         this.configure(config)?;
         this.start();
