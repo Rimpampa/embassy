@@ -96,10 +96,8 @@ impl IrqEnables {
 /// and still does in 0.1.1 — so its position stays a named constant;
 /// everything else is a field accessor.
 ///
-/// Direction is only observable from the slave side, and no P4E1 wiring
-/// exposes a second I2C pair for a single-board master/slave loopback (I2C0
-/// is shorted, I2C1 pins are consumed by SWD/SPI-flash/HLK), so this bit is
-/// a documented assumption until a two-board slave test proves it.
+/// Direction is only observable from the slave side; this bit is a documented
+/// assumption until a two-board slave test proves it.
 const SR_RW_MODE: u32 = 1 << 13;
 
 /// Bounded poll budget for the blocking master waits below.
@@ -238,12 +236,11 @@ struct State {
     /// True while the async waits have the CR event enables armed.
     ///
     /// Kept so a poll that finds the transfer still pending does not rewrite
-    /// `CR` while a byte is in flight: busy-polling callers (the ST25RFAL
-    /// platform runs with interrupts disabled and spins the future) would
-    /// otherwise perform a CR read-modify-write millions of times per second,
-    /// racing the engine's own clearing of the auto-cleared `TB`/`START`
-    /// control bits. The ISR clears this together with the enables, so a
-    /// spurious wake re-arms.
+    /// `CR` while a byte is in flight: busy-polling callers that spin the
+    /// future with interrupts disabled would otherwise perform a CR
+    /// read-modify-write millions of times per second, racing the engine's own
+    /// clearing of the auto-cleared `TB`/`START` control bits. The ISR clears
+    /// this together with the enables, so a spurious wake re-arms.
     armed: AtomicBool,
 }
 
@@ -502,8 +499,8 @@ fn master_abort(regs: &RegisterBlock) {
 /// The driver returns from a transfer the moment the last byte completes;
 /// without this wait a tight loop (or LTO-tightened caller code) issues the
 /// next START within a microsecond, the slave misses it and NACKs the
-/// address (or flags a bus error). The ST25R3916 on P4E1 wedges on such
-/// back-to-back traffic while spaced traffic is clean.
+/// address (or flags a bus error). Some slaves wedge on such back-to-back
+/// traffic while spaced traffic is clean.
 ///
 /// Bounded and infallible by design: on a wedged bus (slave holding SDA)
 /// `BUS_BUSY` never clears, so give up after the budget and let the caller
@@ -901,12 +898,11 @@ impl<'d> I2c<'d, Async> {
         let off = IrqEnables::default();
 
         // If dropped mid-wait (executor cancellation, a `select` loser, or
-        // an outer watchdog such as the ST25RFAL platform's giving up on
-        // this transfer) the unit would be left mid-transfer with START
-        // pending and no STOP: a slave holding SDA for its next bit then
-        // wedges the bus for every later transaction. Abort (STOP) first
-        // so the bus is released, then disarm the enables so the ISR stops
-        // firing with nothing to wake.
+        // an outer watchdog giving up on this transfer) the unit would be left
+        // mid-transfer with START pending and no STOP: a slave holding SDA for
+        // its next bit then wedges the bus for every later transaction. Abort
+        // (STOP) first so the bus is released, then disarm the enables so the
+        // ISR stops firing with nothing to wake.
         let irq_guard = OnDrop::new(|| {
             master_stop(regs);
             set_irq_enables(regs, off);

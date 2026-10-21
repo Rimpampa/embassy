@@ -1057,7 +1057,7 @@ macro_rules! impl_lptimer0_pin {
     };
 }
 
-// SDK examples (ASR6601SE/CB EVAL):
+// SDK examples:
 //   GPIOD PIN10 AF2 = IN1 (GP58)
 //   GPIOD PIN12 AF5 = IN2 (GP60)
 //   GPIOD PIN14 AF3 = ETR (GP62)
