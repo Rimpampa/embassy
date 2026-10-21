@@ -709,7 +709,7 @@ impl<'d> Lpuart<'d, Blocking> {
     }
 
     /// Create a blocking LPUART with explicit RTS/CTS pins and AF selectors.
-    pub fn new_blocking_with_flow_control(
+    pub fn new_blocking_with_rtscts(
         peri: Peri<'d, peripherals::LPUART>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
@@ -745,7 +745,7 @@ impl<'d> Lpuart<'d, Async> {
     }
 
     /// Create an asynchronous LPUART with explicit RTS/CTS pins and AF selectors.
-    pub fn new_with_flow_control(
+    pub fn new_with_rtscts(
         peri: Peri<'d, peripherals::LPUART>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
@@ -922,12 +922,6 @@ impl<'d, M: Mode> Lpuart<'d, M> {
     /// Change the baud rate, keeping all other settings.
     pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
         self.tx.set_baudrate(baudrate)
-    }
-
-    /// Alias of [`Self::set_config`] kept for callers written against the
-    /// earlier owned-`set_config` / reference-`set_config_ref` pair.
-    pub fn set_config_ref(&mut self, config: &Config) -> Result<(), ConfigError> {
-        self.set_config(config)
     }
 }
 
@@ -1255,7 +1249,7 @@ impl<'d, M: Mode> embedded_io::ErrorType for LpuartRx<'d, M> {
     type Error = Error;
 }
 
-impl<'d, M: Mode> embedded_io::Write for LpuartTx<'d, M> {
+impl<'d> embedded_io::Write for LpuartTx<'d, Blocking> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.blocking_write(buf)?;
         Ok(buf.len())
@@ -1266,7 +1260,7 @@ impl<'d, M: Mode> embedded_io::Write for LpuartTx<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_io::Write for Lpuart<'d, M> {
+impl<'d> embedded_io::Write for Lpuart<'d, Blocking> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.tx.write(buf)
     }
@@ -1276,7 +1270,19 @@ impl<'d, M: Mode> embedded_io::Write for Lpuart<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_io::Read for LpuartRx<'d, M> {
+impl<'d, M: Mode> embedded_io::WriteReady for LpuartTx<'d, M> {
+    fn write_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(tx_empty(self.regs()))
+    }
+}
+
+impl<'d, M: Mode> embedded_io::WriteReady for Lpuart<'d, M> {
+    fn write_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(tx_empty(self.tx.regs()))
+    }
+}
+
+impl<'d> embedded_io::Read for LpuartRx<'d, Blocking> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         if buf.is_empty() {
             return Ok(0);
@@ -1298,9 +1304,21 @@ impl<'d, M: Mode> embedded_io::Read for LpuartRx<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_io::Read for Lpuart<'d, M> {
+impl<'d> embedded_io::Read for Lpuart<'d, Blocking> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.rx.read(buf)
+    }
+}
+
+impl<'d, M: Mode> embedded_io::ReadReady for LpuartRx<'d, M> {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(rx_not_empty(self.regs()))
+    }
+}
+
+impl<'d, M: Mode> embedded_io::ReadReady for Lpuart<'d, M> {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(rx_not_empty(self.rx.regs()))
     }
 }
 
@@ -1354,7 +1372,7 @@ impl<'d> embedded_io_async::Read for Lpuart<'d, Async> {
 
 // --- embedded-hal 0.2 blocking traits ----------------------------------------
 
-impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for Lpuart<'d, M> {
+impl<'d> embedded_hal_02::blocking::serial::Write<u8> for Lpuart<'d, Blocking> {
     type Error = Error;
 
     fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
@@ -1366,7 +1384,7 @@ impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for Lpuart<'d, M>
     }
 }
 
-impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for LpuartTx<'d, M> {
+impl<'d> embedded_hal_02::blocking::serial::Write<u8> for LpuartTx<'d, Blocking> {
     type Error = Error;
 
     fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {

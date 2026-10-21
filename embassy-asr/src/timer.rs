@@ -895,6 +895,16 @@ impl<'d, T: Instance> Timer<'d, T> {
     }
 }
 
+impl<'d, T: Instance> embassy_embedded_hal::SetConfig for Timer<'d, T> {
+    type Config = Config;
+    type ConfigError = core::convert::Infallible;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.configure(*config);
+        Ok(())
+    }
+}
+
 impl<'d, T: Instance> Drop for Timer<'d, T> {
     fn drop(&mut self) {
         T::nv_interrupt().disable();

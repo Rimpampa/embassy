@@ -297,17 +297,19 @@ pub(crate) fn configure_i2s_master(word_size: I2sWordSize) {
     enable_clock();
 
     // Master mode plus the word-select divider derived from the sample word
-    // size (exact SDK `i2s_calculate_devision()` results).
-    // Master mode plus the word-select divider derived from the sample word
-    // size (exact SDK `i2s_calculate_devision()` results). Read-modify-write
-    // like before: unrelated CR10 fields (QSPI remap, WS select) are preserved.
-    regs().cr10().modify(|_, w| {
-        w.i2s_mode_sel().master();
-        unsafe { w.i2s_ws_len().bits(word_size.word_select_divider() as u8) }
+    // size (exact SDK `i2s_calculate_devision()` results). Preserve unrelated
+    // CR10 fields (QSPI remap, WS select).
+    critical_section::with(|_| {
+        regs().cr10().modify(|_, w| {
+            w.i2s_mode_sel().master();
+            unsafe { w.i2s_ws_len().bits(word_size.word_select_divider() as u8) }
+        });
     });
 }
 
 pub(crate) fn set_i2s_word_select_output_enabled(enabled: bool) {
     enable_clock();
-    regs().cr10().modify(|_, w| w.i2s_ws_en().bit(enabled));
+    critical_section::with(|_| {
+        regs().cr10().modify(|_, w| w.i2s_ws_en().bit(enabled));
+    });
 }

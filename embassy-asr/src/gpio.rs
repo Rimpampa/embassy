@@ -600,16 +600,6 @@ impl<'d, M: Mode> Flex<'d, M> {
         self.output_type == OutputType::OpenDrain && self.port() == Port::D && self.pin_number() > 7
     }
 
-    /// Return the pin's port.
-    pub fn get_port(&self) -> Port {
-        self.port()
-    }
-
-    /// Return the pin number within its port.
-    pub fn get_pin(&self) -> u8 {
-        self.pin_number()
-    }
-
     /// Configure the internal pull resistor.
     pub fn set_pull(&mut self, pull: Pull) {
         let mask = self.mask();
@@ -818,15 +808,7 @@ impl<'d, M: Mode> Flex<'d, M> {
         !self.is_high()
     }
 
-    /// Return the sampled pin level.
-    #[inline]
-    pub fn get_level(&self) -> Level {
-        self.level()
-    }
-
     /// Get the current pin input level.
-    ///
-    /// Canonical guideline spelling; [`Self::get_level`] is the same call.
     #[inline]
     pub fn level(&self) -> Level {
         self.is_high().into()
@@ -886,15 +868,7 @@ impl<'d, M: Mode> Flex<'d, M> {
         !self.is_set_high()
     }
 
-    /// Return the configured output level.
-    #[inline]
-    pub fn get_output_level(&self) -> Level {
-        self.output_level()
-    }
-
     /// What level output is set to.
-    ///
-    /// Canonical guideline spelling; [`Self::get_output_level`] is the same call.
     #[inline]
     pub fn output_level(&self) -> Level {
         self.output_is_high().into()
@@ -1064,15 +1038,7 @@ impl<'d, M: Mode> Input<'d, M> {
         self.pin.is_low()
     }
 
-    /// Return the sampled input level.
-    #[inline]
-    pub fn get_level(&self) -> Level {
-        self.level()
-    }
-
     /// Get the current pin input level.
-    ///
-    /// Canonical guideline spelling; [`Self::get_level`] is the same call.
     #[inline]
     pub fn level(&self) -> Level {
         self.pin.level()
@@ -1154,12 +1120,6 @@ impl<'d> Output<'d> {
         self.output_is_low()
     }
 
-    /// Return the output latch level.
-    #[inline]
-    pub fn get_output_level(&self) -> Level {
-        self.output_level()
-    }
-
     /// Is the output pin set as high?
     ///
     /// Canonical guideline spelling; [`Self::is_set_high`] is the same call.
@@ -1177,8 +1137,6 @@ impl<'d> Output<'d> {
     }
 
     /// What level output is set to.
-    ///
-    /// Canonical guideline spelling; [`Self::get_output_level`] is the same call.
     #[inline]
     pub fn output_level(&self) -> Level {
         self.pin.output_level()
@@ -1314,12 +1272,6 @@ impl<'d, M: Mode> OutputOpenDrain<'d, M> {
         self.output_is_low()
     }
 
-    /// Return the configured logical output level.
-    #[inline]
-    pub fn get_output_level(&self) -> Level {
-        self.output_level()
-    }
-
     /// Is the output pin set as high?
     ///
     /// Canonical guideline spelling; [`Self::is_set_high`] is the same call.
@@ -1337,8 +1289,6 @@ impl<'d, M: Mode> OutputOpenDrain<'d, M> {
     }
 
     /// What level output is set to.
-    ///
-    /// Canonical guideline spelling; [`Self::get_output_level`] is the same call.
     #[inline]
     pub fn output_level(&self) -> Level {
         self.pin.output_level()
@@ -1362,15 +1312,7 @@ impl<'d, M: Mode> OutputOpenDrain<'d, M> {
         self.pin.is_low()
     }
 
-    /// Return the sampled pin level.
-    #[inline]
-    pub fn get_level(&self) -> Level {
-        self.level()
-    }
-
     /// Get the current pin input level.
-    ///
-    /// Canonical guideline spelling; [`Self::get_level`] is the same call.
     #[inline]
     pub fn level(&self) -> Level {
         self.pin.level()

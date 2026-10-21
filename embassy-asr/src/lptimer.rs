@@ -933,6 +933,15 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 }
 
+impl<'d, T: Instance> embassy_embedded_hal::SetConfig for LpTimer<'d, T> {
+    type Config = Config;
+    type ConfigError = Error;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.configure(*config)
+    }
+}
+
 impl<'d, T: Instance> Drop for LpTimer<'d, T> {
     fn drop(&mut self) {
         T::nv_interrupt().disable();

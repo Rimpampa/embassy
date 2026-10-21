@@ -653,7 +653,7 @@ impl<'d> Uart<'d, Blocking> {
     ///
     /// `tx` / `rx` are `(pin, alternate_function)` pairs. Supply `None` for
     /// unused directions. Flow-control pins are not configured here; use
-    /// [`Self::new_blocking_with_flow_control`] when RTS/CTS are required.
+    /// [`Self::new_blocking_with_rtscts`] when RTS/CTS are required.
     pub fn new_blocking<T: Instance>(
         peri: Peri<'d, T>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
@@ -664,7 +664,7 @@ impl<'d> Uart<'d, Blocking> {
     }
 
     /// Create a blocking UART with explicit RTS/CTS pins and AF selectors.
-    pub fn new_blocking_with_flow_control<T: Instance>(
+    pub fn new_blocking_with_rtscts<T: Instance>(
         peri: Peri<'d, T>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
@@ -701,7 +701,7 @@ impl<'d> Uart<'d, Async> {
     }
 
     /// Create an asynchronous UART with explicit RTS/CTS pins and AF selectors.
-    pub fn new_with_flow_control<T: Instance>(
+    pub fn new_with_rtscts<T: Instance>(
         peri: Peri<'d, T>,
         tx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
         rx: Option<(Peri<'d, impl Pin>, AlternateFunction)>,
@@ -868,6 +868,11 @@ impl<'d, M: Mode> Uart<'d, M> {
     /// Change the baud rate.
     pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
         self.tx.set_baudrate(baudrate)
+    }
+
+    /// Send a break condition on the TX line.
+    pub fn send_break(&mut self) {
+        self.tx.send_break();
     }
 
     /// Reconfigure the UART with new settings.
@@ -1254,7 +1259,7 @@ impl<'d, M: Mode> embedded_io::ErrorType for UartRx<'d, M> {
     type Error = Error;
 }
 
-impl<'d, M: Mode> embedded_io::Write for UartTx<'d, M> {
+impl<'d> embedded_io::Write for UartTx<'d, Blocking> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.blocking_write(buf)?;
         Ok(buf.len())
@@ -1265,7 +1270,7 @@ impl<'d, M: Mode> embedded_io::Write for UartTx<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_io::Write for Uart<'d, M> {
+impl<'d> embedded_io::Write for Uart<'d, Blocking> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.tx.write(buf)
     }
@@ -1275,7 +1280,19 @@ impl<'d, M: Mode> embedded_io::Write for Uart<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_io::Read for UartRx<'d, M> {
+impl<'d, M: Mode> embedded_io::WriteReady for UartTx<'d, M> {
+    fn write_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(!self.regs().fr().read().txff().bit_is_set())
+    }
+}
+
+impl<'d, M: Mode> embedded_io::WriteReady for Uart<'d, M> {
+    fn write_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(!self.tx.regs().fr().read().txff().bit_is_set())
+    }
+}
+
+impl<'d> embedded_io::Read for UartRx<'d, Blocking> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         if buf.is_empty() {
             return Ok(0);
@@ -1296,9 +1313,25 @@ impl<'d, M: Mode> embedded_io::Read for UartRx<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_io::Read for Uart<'d, M> {
+impl<'d> embedded_io::Read for Uart<'d, Blocking> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.rx.read(buf)
+    }
+}
+
+impl<'d, M: Mode> embedded_io::ReadReady for UartRx<'d, M> {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        let state = self.info.state;
+        Ok(
+            state.rx_head.load(Ordering::Acquire) != state.rx_tail.load(Ordering::Acquire)
+                || !self.regs().fr().read().rxfe().bit_is_set(),
+        )
+    }
+}
+
+impl<'d, M: Mode> embedded_io::ReadReady for Uart<'d, M> {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        self.rx.read_ready()
     }
 }
 
@@ -1394,7 +1427,7 @@ impl_uart!(UART3, UART3, 3, 0x4001_1000, Uart3, false, Uart3Tx, Uart3Rx);
 
 // --- embedded-hal 0.2 blocking traits ----------------------------------------
 
-impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for Uart<'d, M> {
+impl<'d> embedded_hal_02::blocking::serial::Write<u8> for Uart<'d, Blocking> {
     type Error = Error;
 
     fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
@@ -1406,7 +1439,7 @@ impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for Uart<'d, M> {
     }
 }
 
-impl<'d, M: Mode> embedded_hal_02::blocking::serial::Write<u8> for UartTx<'d, M> {
+impl<'d> embedded_hal_02::blocking::serial::Write<u8> for UartTx<'d, Blocking> {
     type Error = Error;
 
     fn bwrite_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {

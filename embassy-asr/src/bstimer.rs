@@ -334,6 +334,16 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     }
 }
 
+impl<'d, T: Instance, M: Mode> embassy_embedded_hal::SetConfig for BsTimer<'d, T, M> {
+    type Config = Config;
+    type ConfigError = core::convert::Infallible;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.configure(*config);
+        Ok(())
+    }
+}
+
 impl<'d, T: Instance, M: Mode> Drop for BsTimer<'d, T, M> {
     fn drop(&mut self) {
         self.stop();
