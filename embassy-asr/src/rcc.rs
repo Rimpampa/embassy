@@ -13,7 +13,8 @@ const RCO48M_HZ: u32 = 48_000_000;
 const RCO4M_HZ: u32 = 3_600_000;
 const XO24M_HZ: u32 = 24_000_000;
 const XO32M_HZ: u32 = 32_000_000;
-const LOW_SPEED_HZ: u32 = 32_768;
+const RCO32K_HZ: u32 = 32_000;
+const XO32K_HZ: u32 = 32_768;
 
 /// PAC gaps kept as named constants: the analog-window registers live outside
 /// the PAC RCC block. (The PAC LORAC `*_bat` view covers the XO32M/reset
@@ -77,7 +78,7 @@ pub enum SystemClockSource {
     /// Internal 48 MHz RC oscillator divided by two.
     #[default]
     Rco48mDiv2 = 0,
-    /// Internal 32.768 kHz RC oscillator.
+    /// Internal 32 kHz RC oscillator.
     Rco32k = 1,
     /// External 32.768 kHz crystal oscillator.
     Xo32k = 2,
@@ -96,7 +97,8 @@ impl SystemClockSource {
     pub const fn frequency_hz(self) -> u32 {
         match self {
             Self::Rco48mDiv2 => RCO48M_HZ / 2,
-            Self::Rco32k | Self::Xo32k => LOW_SPEED_HZ,
+            Self::Rco32k => RCO32K_HZ,
+            Self::Xo32k => XO32K_HZ,
             Self::Xo24m => XO24M_HZ,
             Self::Xo32m => XO32M_HZ,
             Self::Rco4m => RCO4M_HZ,
@@ -259,6 +261,8 @@ pub enum WaitTarget {
     Xo32m,
     /// RCC clock-domain synchronization.
     ClockDomain,
+    /// EFC flash read wait-state programming.
+    FlashReadNum,
 }
 
 /// RCC configuration or peripheral-control error.
@@ -324,7 +328,7 @@ pub fn init(_rcc: Peri<'_, peripherals::RCC>, config: Config) -> Result<Clocks, 
         config.xo32m_uses_tcxo,
         config.readiness_poll_limit,
     )?;
-    configure_clock_tree(config);
+    configure_clock_tree(config)?;
 
     let clocks = Clocks::from_config(config);
     SYSCLK_HZ.store(clocks.sysclk_hz, Ordering::Relaxed);
@@ -360,7 +364,8 @@ fn current_system_frequency() -> Option<u32> {
     // only PLL has no vendor frequency to report.
     match rcc().cr0().read().sysclk_sel().variant() {
         SysclkSel::Rco48mDiv2 => Some(RCO48M_HZ / 2),
-        SysclkSel::Rco32k | SysclkSel::Xo32k => Some(LOW_SPEED_HZ),
+        SysclkSel::Rco32k => Some(RCO32K_HZ),
+        SysclkSel::Xo32k => Some(XO32K_HZ),
         SysclkSel::Pll => None,
         SysclkSel::Xo24m => Some(XO24M_HZ),
         SysclkSel::Xo32m => Some(XO32M_HZ),
@@ -432,31 +437,62 @@ fn set_system_clock(source: SystemClockSource) {
     });
 }
 
-fn configure_clock_tree(config: Config) {
+fn configure_clock_tree(config: Config) -> Result<(), Error> {
     let old_frequency = current_system_frequency();
     let new_frequency = config.system_clock.frequency_hz();
+    let new_read_num = flash_read_num_for(new_frequency);
 
     // Protect both peripheral buses while HCLK and SYSCLK are in transition.
     set_pclk_dividers(PclkDivider::Div16, PclkDivider::Div16);
 
     match old_frequency {
         Some(old_frequency) if new_frequency >= old_frequency => {
+            // RM 10.3.3: increase the flash wait states before raising SYS_CLK.
+            set_flash_read_num(new_read_num, config.readiness_poll_limit)?;
             set_hclk_divider(config.hclk_divider);
             set_system_clock(config.system_clock);
         }
         Some(_) => {
             set_system_clock(config.system_clock);
             set_hclk_divider(config.hclk_divider);
+            // RM 10.3.3: decrease the flash wait states after lowering SYS_CLK.
+            set_flash_read_num(new_read_num, config.readiness_poll_limit)?;
         }
         None => {
-            // PLL setup/frequency is not specified by the vendor RCC API.
+            // PLL setup/frequency is not specified by the vendor RCC API. Use
+            // the highest wait-state setting while switching away from it.
+            set_flash_read_num(2, config.readiness_poll_limit)?;
             set_hclk_divider(HclkDivider::Div512);
             set_system_clock(config.system_clock);
             set_hclk_divider(config.hclk_divider);
+            set_flash_read_num(new_read_num, config.readiness_poll_limit)?;
         }
     }
 
     set_pclk_dividers(config.pclk0_divider, config.pclk1_divider);
+    Ok(())
+}
+
+/// Flash read wait states required for a given SYS_CLK frequency.
+///
+/// RM 10.3.3: 48 MHz needs 2, 32/24 MHz need 1, and 4 MHz/32 kHz need 0.
+fn flash_read_num_for(frequency_hz: u32) -> u8 {
+    if frequency_hz >= 48_000_000 {
+        2
+    } else if frequency_hz >= 24_000_000 {
+        1
+    } else {
+        0
+    }
+}
+
+fn set_flash_read_num(read_num: u8, poll_limit: u32) -> Result<(), Error> {
+    let efc = unsafe { pac::Efc::steal() };
+    // SAFETY: the field is 4 bits and `read_num` is limited to 0..=2 here.
+    efc.timing_cfg().modify(|_, w| unsafe { w.read_num().bits(read_num) });
+    wait_until(poll_limit, WaitTarget::FlashReadNum, || {
+        efc.sr().read().read_num_done().bit_is_set()
+    })
 }
 
 fn wait_until(poll_limit: u32, target: WaitTarget, mut ready: impl FnMut() -> bool) -> Result<(), Error> {

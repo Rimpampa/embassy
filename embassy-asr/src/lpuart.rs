@@ -51,7 +51,8 @@ use crate::{interrupt, pac, peripherals};
 const BAUD_INT_MAX: u32 = 0x0fff;
 
 const RCO4M_HZ: u32 = 3_600_000;
-const LOW_SPEED_HZ: u32 = 32_768;
+const RCO32K_HZ: u32 = 32_000;
+const XO32K_HZ: u32 = 32_768;
 
 static STATE: State = State::new();
 
@@ -233,7 +234,7 @@ pub enum ClockSource {
     /// External 32.768 kHz crystal (`RCC_LPUART_CLK_SOURCE_XO32K`).
     #[default]
     Xo32k,
-    /// Internal 32.768 kHz RC (`RCC_LPUART_CLK_SOURCE_RCO32K`).
+    /// Internal 32 kHz RC (`RCC_LPUART_CLK_SOURCE_RCO32K`).
     Rco32k,
     /// Internal RC reported as 3.6 MHz by the vendor (`RCC_LPUART_CLK_SOURCE_RCO4M`).
     Rco4m,
@@ -242,7 +243,8 @@ pub enum ClockSource {
 impl ClockSource {
     const fn frequency_hz(self) -> u32 {
         match self {
-            Self::Xo32k | Self::Rco32k => LOW_SPEED_HZ,
+            Self::Xo32k => XO32K_HZ,
+            Self::Rco32k => RCO32K_HZ,
             Self::Rco4m => RCO4M_HZ,
         }
     }
