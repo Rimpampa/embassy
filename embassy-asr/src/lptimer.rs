@@ -17,6 +17,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::Poll;
 
+use embassy_hal_internal::impl_peripheral;
 use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_sync::waitqueue::AtomicWaker;
 
@@ -391,14 +392,90 @@ impl Default for Config {
     }
 }
 
+struct Info {
+    regs: *const pac::lptim0::RegisterBlock,
+    peripheral: RccPeripheral,
+    number: usize,
+    interrupt: pac::Interrupt,
+}
+
+impl Info {
+    #[inline]
+    fn regs(&self) -> &'static pac::lptim0::RegisterBlock {
+        unsafe { &*self.regs }
+    }
+
+    fn clock_source_sync(&self) -> bool {
+        let rcc = unsafe { pac::Rcc::steal() };
+        match self.number {
+            0 => rcc.sr1().read().lptim0_clk_en_sync().bit_is_set(),
+            _ => rcc.sr1().read().lptim1_clk_en_sync().bit_is_set(),
+        }
+    }
+
+    fn gate_functional_clock(&self, enable: bool) {
+        critical_section::with(|_| {
+            let rcc = unsafe { pac::Rcc::steal() };
+            match self.number {
+                0 => rcc.cgr1().modify(|_, w| w.lptim0_clk_en().bit(enable)),
+                _ => rcc.cgr1().modify(|_, w| w.lptim1_clk_en().bit(enable)),
+            };
+        });
+    }
+
+    fn set_clock_source(&self, source: ClockSource) {
+        critical_section::with(|_| {
+            let rcc = unsafe { pac::Rcc::steal() };
+            if self.number == 0 {
+                rcc.cr1().modify(|_, w| match source {
+                    ClockSource::ExtClk => w.lptim0_ext_clk_sel().set_bit(),
+                    ClockSource::Pclk0 => {
+                        w.lptim0_ext_clk_sel().clear_bit();
+                        w.lptim0_clk_sel().pclk0()
+                    }
+                    ClockSource::Rco4m => {
+                        w.lptim0_ext_clk_sel().clear_bit();
+                        w.lptim0_clk_sel().rco4m()
+                    }
+                    ClockSource::Xo32k => {
+                        w.lptim0_ext_clk_sel().clear_bit();
+                        w.lptim0_clk_sel().xo32k()
+                    }
+                    ClockSource::Rco32k => {
+                        w.lptim0_ext_clk_sel().clear_bit();
+                        w.lptim0_clk_sel().rco32k()
+                    }
+                });
+            } else {
+                rcc.cr1().modify(|_, w| match source {
+                    ClockSource::ExtClk => w.lptim1_ext_clk_sel().set_bit(),
+                    ClockSource::Pclk0 => {
+                        w.lptim1_ext_clk_sel().clear_bit();
+                        w.lptim1_clk_sel().pclk0()
+                    }
+                    ClockSource::Rco4m => {
+                        w.lptim1_ext_clk_sel().clear_bit();
+                        w.lptim1_clk_sel().rco4m()
+                    }
+                    ClockSource::Xo32k => {
+                        w.lptim1_ext_clk_sel().clear_bit();
+                        w.lptim1_clk_sel().xo32k()
+                    }
+                    ClockSource::Rco32k => {
+                        w.lptim1_ext_clk_sel().clear_bit();
+                        w.lptim1_clk_sel().rco32k()
+                    }
+                });
+            }
+        });
+    }
+}
+
+// SAFETY: `Info` only contains read-only register addresses and instance data.
+unsafe impl Sync for Info {}
+
 trait SealedInstance {
-    fn regs() -> &'static pac::lptim0::RegisterBlock;
-    fn rcc_peripheral() -> RccPeripheral;
-    fn nv_interrupt() -> pac::Interrupt;
-    const INDEX: usize;
-    fn clock_source_sync() -> bool;
-    fn gate_functional_clock(enable: bool);
-    fn set_clock_source(source: ClockSource);
+    fn info() -> &'static Info;
 }
 
 trait SealedAfPin {
@@ -407,138 +484,46 @@ trait SealedAfPin {
 
 /// LPTIMER peripheral instance.
 #[allow(private_bounds)]
-pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
+pub trait Instance: SealedInstance + PeripheralType + Into<AnyLpTimer> + 'static + Send {
     /// NVIC vector for this instance.
     type Interrupt: TypelevelInterrupt;
 }
 
-impl SealedInstance for peripherals::LPTIMER0 {
-    #[inline]
-    fn regs() -> &'static pac::lptim0::RegisterBlock {
-        unsafe { &*pac::Lptim0::ptr() }
-    }
-
-    #[inline]
-    fn rcc_peripheral() -> RccPeripheral {
-        RccPeripheral::Lptimer0
-    }
-
-    #[inline]
-    fn nv_interrupt() -> pac::Interrupt {
-        pac::Interrupt::LPTIM0
-    }
-
-    const INDEX: usize = 0;
-
-    fn clock_source_sync() -> bool {
-        unsafe { pac::Rcc::steal() }
-            .sr1()
-            .read()
-            .lptim0_clk_en_sync()
-            .bit_is_set()
-    }
-
-    fn gate_functional_clock(enable: bool) {
-        critical_section::with(|_| {
-            unsafe { pac::Rcc::steal() }
-                .cgr1()
-                .modify(|_, w| w.lptim0_clk_en().bit(enable));
-        });
-    }
-
-    fn set_clock_source(source: ClockSource) {
-        critical_section::with(|_| {
-            let rcc = unsafe { pac::Rcc::steal() };
-            rcc.cr1().modify(|_, w| match source {
-                ClockSource::ExtClk => w.lptim0_ext_clk_sel().set_bit(),
-                ClockSource::Pclk0 => {
-                    w.lptim0_ext_clk_sel().clear_bit();
-                    w.lptim0_clk_sel().pclk0()
-                }
-                ClockSource::Rco4m => {
-                    w.lptim0_ext_clk_sel().clear_bit();
-                    w.lptim0_clk_sel().rco4m()
-                }
-                ClockSource::Xo32k => {
-                    w.lptim0_ext_clk_sel().clear_bit();
-                    w.lptim0_clk_sel().xo32k()
-                }
-                ClockSource::Rco32k => {
-                    w.lptim0_ext_clk_sel().clear_bit();
-                    w.lptim0_clk_sel().rco32k()
-                }
-            });
-        });
-    }
+/// Type-erased LPTIMER token.
+pub struct AnyLpTimer {
+    _private: (),
 }
 
-impl Instance for peripherals::LPTIMER0 {
-    type Interrupt = interrupt::typelevel::LPTIM0;
+impl_peripheral!(AnyLpTimer);
+
+macro_rules! impl_instance {
+    ($name:ident, $pac:ident, $interrupt:ident, $peripheral:ident, $number:expr) => {
+        impl SealedInstance for peripherals::$name {
+            fn info() -> &'static Info {
+                static INFO: Info = Info {
+                    regs: pac::$pac::PTR,
+                    peripheral: RccPeripheral::$peripheral,
+                    number: $number,
+                    interrupt: pac::Interrupt::$interrupt,
+                };
+                &INFO
+            }
+        }
+
+        impl From<peripherals::$name> for AnyLpTimer {
+            fn from(_: peripherals::$name) -> Self {
+                Self { _private: () }
+            }
+        }
+
+        impl Instance for peripherals::$name {
+            type Interrupt = interrupt::typelevel::$interrupt;
+        }
+    };
 }
 
-impl SealedInstance for peripherals::LPTIMER1 {
-    #[inline]
-    fn regs() -> &'static pac::lptim0::RegisterBlock {
-        unsafe { &*pac::Lptim1::ptr() }
-    }
-
-    #[inline]
-    fn rcc_peripheral() -> RccPeripheral {
-        RccPeripheral::Lptimer1
-    }
-
-    #[inline]
-    fn nv_interrupt() -> pac::Interrupt {
-        pac::Interrupt::LPTIM1
-    }
-
-    const INDEX: usize = 1;
-
-    fn clock_source_sync() -> bool {
-        unsafe { pac::Rcc::steal() }
-            .sr1()
-            .read()
-            .lptim1_clk_en_sync()
-            .bit_is_set()
-    }
-
-    fn gate_functional_clock(enable: bool) {
-        critical_section::with(|_| {
-            unsafe { pac::Rcc::steal() }
-                .cgr1()
-                .modify(|_, w| w.lptim1_clk_en().bit(enable));
-        });
-    }
-
-    fn set_clock_source(source: ClockSource) {
-        critical_section::with(|_| {
-            let rcc = unsafe { pac::Rcc::steal() };
-            rcc.cr1().modify(|_, w| match source {
-                ClockSource::ExtClk => w.lptim1_ext_clk_sel().set_bit(),
-                ClockSource::Pclk0 => {
-                    w.lptim1_ext_clk_sel().clear_bit();
-                    w.lptim1_clk_sel().pclk0()
-                }
-                ClockSource::Rco4m => {
-                    w.lptim1_ext_clk_sel().clear_bit();
-                    w.lptim1_clk_sel().rco4m()
-                }
-                ClockSource::Xo32k => {
-                    w.lptim1_ext_clk_sel().clear_bit();
-                    w.lptim1_clk_sel().xo32k()
-                }
-                ClockSource::Rco32k => {
-                    w.lptim1_ext_clk_sel().clear_bit();
-                    w.lptim1_clk_sel().rco32k()
-                }
-            });
-        });
-    }
-}
-
-impl Instance for peripherals::LPTIMER1 {
-    type Interrupt = interrupt::typelevel::LPTIM1;
-}
+impl_instance!(LPTIMER0, Lptim0, LPTIM0, Lptimer0, 0);
+impl_instance!(LPTIMER1, Lptim1, LPTIM1, Lptimer1, 1);
 
 /// Interrupt handler for one LPTIMER instance.
 ///
@@ -550,7 +535,8 @@ pub struct InterruptHandler<T: Instance> {
 
 impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
-        let regs = T::regs();
+        let info = T::info();
+        let regs = info.regs();
         let pending = regs.sr1().read().bits() & regs.ier().read().bits() & IT_MASK;
         if pending == 0 {
             return;
@@ -572,29 +558,30 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
             }
         }
 
-        PENDING[T::INDEX].fetch_or(pending, Ordering::Release);
-        WAKERS[T::INDEX].wake();
+        PENDING[info.number].fetch_or(pending, Ordering::Release);
+        WAKERS[info.number].wake();
     }
 }
 
 /// Owned low-power timer.
-pub struct LpTimer<'d, T: Instance> {
-    _peri: Peri<'d, T>,
+pub struct LpTimer<'d> {
+    _peri: Peri<'d, AnyLpTimer>,
+    info: &'static Info,
 }
 
-impl<'d, T: Instance> LpTimer<'d, T> {
+impl<'d> LpTimer<'d> {
     /// Reset the block, select `config.clock_source`, enable clocks, and apply
     /// the vendor `lptimer_init` fields. The counter remains disabled.
     ///
     /// Does not bind the update interrupt; use [`Self::new`] for
     /// interrupt-driven use.
-    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+    pub fn new_blocking<T: Instance>(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
         Self::create(peri, config)
     }
 
     /// Reset the block, select `config.clock_source`, enable clocks, and apply
     /// the vendor `lptimer_init` fields. The counter remains disabled.
-    pub fn new(
+    pub fn new<T: Instance>(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
         config: Config,
@@ -602,31 +589,35 @@ impl<'d, T: Instance> LpTimer<'d, T> {
         Self::create(peri, config)
     }
 
-    fn create(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+    fn create<T: Instance>(peri: Peri<'d, T>, config: Config) -> Result<Self, Error> {
+        let info = T::info();
         // Match the wakeup example: gate functional clock, pulse reset, select
         // source, then re-enable.
-        let _ = rcc::disable_peripheral(T::rcc_peripheral());
-        rcc::reset_peripheral(T::rcc_peripheral())?;
-        set_instance_clock_source::<T>(config.clock_source)?;
-        rcc::enable_peripheral(T::rcc_peripheral())?;
+        let _ = rcc::disable_peripheral(info.peripheral);
+        rcc::reset_peripheral(info.peripheral)?;
+        set_instance_clock_source(info, config.clock_source)?;
+        rcc::enable_peripheral(info.peripheral)?;
 
-        T::nv_interrupt().disable();
-        T::nv_interrupt().unpend();
-        PENDING[T::INDEX].store(0, Ordering::Release);
+        info.interrupt.disable();
+        info.interrupt.unpend();
+        PENDING[info.number].store(0, Ordering::Release);
 
-        let this = Self { _peri: peri };
+        let this = Self {
+            _peri: peri.into(),
+            info,
+        };
         this.apply_init(config)?;
         Ok(this)
     }
 
     /// Re-apply the vendor init fields while the counter is stopped.
     pub fn configure(&mut self, config: Config) -> Result<(), Error> {
-        set_instance_clock_source::<T>(config.clock_source)?;
+        set_instance_clock_source(self.info, config.clock_source)?;
         self.apply_init(config)
     }
 
     fn apply_init(&self, config: Config) -> Result<(), Error> {
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)?;
 
         self.regs().cfgr().modify(|_, w| {
             if config.count_by_external {
@@ -635,7 +626,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
                 w.countmode().clear_bit()
             }
         });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)?;
 
         self.modify_cfgr_bits(CFGR_PRESC_MASK, 0)?;
         self.modify_cfgr_bits(CFGR_PRESC_MASK, config.prescaler as u32)?;
@@ -647,7 +638,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
                 w.preload().clear_bit()
             }
         });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)?;
 
         self.regs().cfgr().modify(|_, w| {
             if config.wavpol_inverted {
@@ -656,7 +647,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
                 w.wavpol().clear_bit()
             }
         });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)?;
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)?;
 
         Ok(())
     }
@@ -664,7 +655,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// Enable or disable the peripheral (`CR.ENABLE`).
     pub fn set_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cr().modify(|_, w| w.enable().bit(enabled));
-        wait_isr::<T>(ISR_CROK, TimeoutTarget::Crok)
+        wait_isr(self.info, ISR_CROK, TimeoutTarget::Crok)
     }
 
     /// Write ARR and wait for `ARROK`.
@@ -678,7 +669,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
         unsafe {
             self.regs().arr().write_with_zero(|w| w.arr().bits(value));
         }
-        wait_isr::<T>(ISR_ARROK, TimeoutTarget::Arrok)
+        wait_isr(self.info, ISR_ARROK, TimeoutTarget::Arrok)
     }
 
     /// Write CMP and wait for `CMPOK`.
@@ -688,7 +679,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
         unsafe {
             self.regs().cmp().write_with_zero(|w| w.cmp().bits(value));
         }
-        wait_isr::<T>(ISR_CMPOK, TimeoutTarget::Cmpok)
+        wait_isr(self.info, ISR_CMPOK, TimeoutTarget::Cmpok)
     }
 
     /// Current ARR value.
@@ -713,7 +704,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
             CountMode::Continuous => CR_CNTSTRT,
         };
         self.regs().cr().modify(|r, w| unsafe { w.bits(r.bits() | bit) });
-        wait_isr::<T>(ISR_CROK, TimeoutTarget::Crok)
+        wait_isr(self.info, ISR_CROK, TimeoutTarget::Crok)
     }
 
     /// Clear a start-mode bit.
@@ -723,13 +714,13 @@ impl<'d, T: Instance> LpTimer<'d, T> {
             CountMode::Continuous => CR_CNTSTRT,
         };
         self.regs().cr().modify(|r, w| unsafe { w.bits(r.bits() & !bit) });
-        wait_isr::<T>(ISR_CROK, TimeoutTarget::Crok)
+        wait_isr(self.info, ISR_CROK, TimeoutTarget::Crok)
     }
 
     /// Enable or disable timeout mode (`CFGR.TIMEOUT`).
     pub fn set_timeout_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.timeout().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Enable or disable wake sources used with STOP modes.
@@ -756,19 +747,19 @@ impl<'d, T: Instance> LpTimer<'d, T> {
             }
             w
         });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Enable or disable waveform generation (`CFGR.WAVE`).
     pub fn set_wave_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.wave().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Enable or disable encoder mode (`CFGR.ENC`).
     pub fn set_encoder_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.enc().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Configure external trigger polarity.
@@ -792,7 +783,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// Enable or disable the trigger digital filter.
     pub fn set_trigger_filter_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.trgflt_en().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Configure the external clock digital filter value.
@@ -804,7 +795,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     /// Enable or disable the external clock digital filter.
     pub fn set_clock_filter_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.regs().cfgr().modify(|_, w| w.ckflt_en().bit(enabled));
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     /// Configure external clock edge polarity.
@@ -837,10 +828,10 @@ impl<'d, T: Instance> LpTimer<'d, T> {
             || ier.upie().bit_is_set()
             || ier.downie().bit_is_set();
         if any_enabled {
-            T::nv_interrupt().unpend();
-            unsafe { T::nv_interrupt().enable() };
+            self.info.interrupt.unpend();
+            unsafe { self.info.interrupt.enable() };
         } else {
-            T::nv_interrupt().disable();
+            self.info.interrupt.disable();
         }
     }
 
@@ -884,11 +875,11 @@ impl<'d, T: Instance> LpTimer<'d, T> {
         }
         self.set_interrupt_enabled(flags, true);
         poll_fn(|cx| {
-            WAKERS[T::INDEX].register(cx.waker());
+            WAKERS[self.info.number].register(cx.waker());
 
-            let latched = PENDING[T::INDEX].load(Ordering::Acquire) & mask;
+            let latched = PENDING[self.info.number].load(Ordering::Acquire) & mask;
             if latched != 0 {
-                PENDING[T::INDEX].fetch_and(!latched, Ordering::AcqRel);
+                PENDING[self.info.number].fetch_and(!latched, Ordering::AcqRel);
                 return Poll::Ready(InterruptFlags(latched));
             }
 
@@ -896,7 +887,7 @@ impl<'d, T: Instance> LpTimer<'d, T> {
             if live != 0 {
                 // Handler has not run yet; clear in software path as the SDK does.
                 let _ = self.clear_interrupt(InterruptFlags(live));
-                PENDING[T::INDEX].fetch_and(!live, Ordering::AcqRel);
+                PENDING[self.info.number].fetch_and(!live, Ordering::AcqRel);
                 return Poll::Ready(InterruptFlags(live));
             }
 
@@ -906,17 +897,17 @@ impl<'d, T: Instance> LpTimer<'d, T> {
     }
 
     /// Mux a documented `IN1` pin to this timer and return the owned GPIO wrap.
-    pub fn take_in1_pin(&self, pin: Peri<'d, impl In1Pin<T>>) -> Flex<'d> {
+    pub fn take_in1_pin<T: Instance>(&self, pin: Peri<'d, impl In1Pin<T>>) -> Flex<'d> {
         configure_af(pin)
     }
 
     /// Mux a documented `IN2` pin to this timer and return the owned GPIO wrap.
-    pub fn take_in2_pin(&self, pin: Peri<'d, impl In2Pin<T>>) -> Flex<'d> {
+    pub fn take_in2_pin<T: Instance>(&self, pin: Peri<'d, impl In2Pin<T>>) -> Flex<'d> {
         configure_af(pin)
     }
 
     /// Mux a documented `ETR` pin to this timer and return the owned GPIO wrap.
-    pub fn take_etr_pin(&self, pin: Peri<'d, impl EtrPin<T>>) -> Flex<'d> {
+    pub fn take_etr_pin<T: Instance>(&self, pin: Peri<'d, impl EtrPin<T>>) -> Flex<'d> {
         configure_af(pin)
     }
 
@@ -924,16 +915,16 @@ impl<'d, T: Instance> LpTimer<'d, T> {
         self.regs()
             .cfgr()
             .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (value & mask)) });
-        wait_isr::<T>(ISR_CFGROK, TimeoutTarget::Cfgrok)
+        wait_isr(self.info, ISR_CFGROK, TimeoutTarget::Cfgrok)
     }
 
     #[inline]
     fn regs(&self) -> &'static pac::lptim0::RegisterBlock {
-        T::regs()
+        self.info.regs()
     }
 }
 
-impl<'d, T: Instance> embassy_embedded_hal::SetConfig for LpTimer<'d, T> {
+impl<'d> embassy_embedded_hal::SetConfig for LpTimer<'d> {
     type Config = Config;
     type ConfigError = Error;
 
@@ -942,12 +933,12 @@ impl<'d, T: Instance> embassy_embedded_hal::SetConfig for LpTimer<'d, T> {
     }
 }
 
-impl<'d, T: Instance> Drop for LpTimer<'d, T> {
+impl<'d> Drop for LpTimer<'d> {
     fn drop(&mut self) {
-        T::nv_interrupt().disable();
+        self.info.interrupt.disable();
         let _ = self.set_enabled(false);
-        let _ = rcc::disable_peripheral(T::rcc_peripheral());
-        let _ = rcc::reset_peripheral(T::rcc_peripheral());
+        let _ = rcc::disable_peripheral(self.info.peripheral);
+        let _ = rcc::reset_peripheral(self.info.peripheral);
     }
 }
 
@@ -1018,39 +1009,39 @@ fn interrupt_to_csr(flags: u32) -> u32 {
     csr
 }
 
-fn wait_isr<T: Instance>(mask: u32, target: TimeoutTarget) -> Result<(), Error> {
+fn wait_isr(info: &'static Info, mask: u32, target: TimeoutTarget) -> Result<(), Error> {
     // Single-flag polls could use the `isr` accessors; the mask form stays
     // to match the vendor polling sequence bit-for-bit.
     for _ in 0..POLL_LIMIT {
-        if T::regs().isr().read().bits() & mask == mask {
+        if info.regs().isr().read().bits() & mask == mask {
             return Ok(());
         }
         core::hint::spin_loop();
     }
-    if T::regs().isr().read().bits() & mask == mask {
+    if info.regs().isr().read().bits() & mask == mask {
         Ok(())
     } else {
         Err(Error::Timeout(target))
     }
 }
 
-fn set_instance_clock_source<T: Instance>(source: ClockSource) -> Result<(), Error> {
-    if T::clock_source_sync() {
+fn set_instance_clock_source(info: &'static Info, source: ClockSource) -> Result<(), Error> {
+    if info.clock_source_sync() {
         // Vendor disables the functional clock before changing CR1.
-        T::gate_functional_clock(false);
+        info.gate_functional_clock(false);
 
         for _ in 0..POLL_LIMIT {
-            if !T::clock_source_sync() {
+            if !info.clock_source_sync() {
                 break;
             }
             core::hint::spin_loop();
         }
-        if T::clock_source_sync() {
+        if info.clock_source_sync() {
             return Err(Error::Timeout(TimeoutTarget::ClockSourceSync));
         }
     }
 
-    T::set_clock_source(source);
+    info.set_clock_source(source);
     Ok(())
 }
 
