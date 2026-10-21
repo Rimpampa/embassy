@@ -633,17 +633,18 @@ impl<'d, M: Mode> Flex<'d, M> {
 
     /// Configure the documented output drive capability.
     pub fn set_drive(&mut self, drive: Drive) {
-        let mask = self.mask();
-        // DSR is write-only in official tremo.svd: write full mask for 8mA,
-        // zero for 4mA (loses per-pin state, matches SVD write-only semantics).
-        unsafe {
-            regs(self.port()).dsr().write_with_zero(|w| {
-                w.ds().bits(match drive {
-                    Drive::_4mA => 0,
-                    Drive::_8mA => mask as u16,
-                })
-            });
-        }
+        let mask = self.mask() as u32;
+        // The SVD models DSR as write-only, but the vendor driver performs
+        // read-modify-write on it. Preserve the other pins on the port.
+        critical_section::with(|_| unsafe {
+            let register = regs(self.port()).dsr().as_ptr() as *mut u32;
+            let mut value = core::ptr::read_volatile(register);
+            match drive {
+                Drive::_4mA => value &= !mask,
+                Drive::_8mA => value |= mask,
+            }
+            core::ptr::write_volatile(register, value);
+        });
     }
 
     /// Select the GPIO slew rate.
@@ -967,9 +968,11 @@ impl<'d, M: Mode> Flex<'d, M> {
         let mask = 0xf << shift;
         let value = offset | if level == Level::High { 0x4 } else { 0 } | if enable { 0x8 } else { 0 };
 
-        regs(port)
-            .stop3_wu_cr()
-            .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (value << shift)) });
+        critical_section::with(|_| {
+            regs(port)
+                .stop3_wu_cr()
+                .modify(|r, w| unsafe { w.bits((r.bits() & !mask) | (value << shift)) });
+        });
         Ok(())
     }
 
