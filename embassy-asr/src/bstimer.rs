@@ -11,7 +11,8 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Poll;
 
-use embassy_hal_internal::interrupt::Priority;
+use embassy_hal_internal::impl_peripheral;
+use embassy_hal_internal::interrupt::{InterruptExt, Priority};
 use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::interrupt::typelevel::{Binding, Handler, Interrupt as TypelevelInterrupt};
@@ -72,41 +73,65 @@ impl Default for Config {
     }
 }
 
+struct Info {
+    regs: *const pac::bstim0::RegisterBlock,
+    peripheral: Peripheral,
+    number: usize,
+    interrupt: pac::Interrupt,
+    sr: usize,
+}
+
+impl Info {
+    #[inline]
+    fn regs(&self) -> &'static pac::bstim0::RegisterBlock {
+        unsafe { &*self.regs }
+    }
+
+    #[inline]
+    fn sr_ptr(&self) -> *mut u32 {
+        self.sr as *mut u32
+    }
+}
+
+// SAFETY: `Info` only contains read-only register addresses.
+unsafe impl Sync for Info {}
+
 trait SealedInstance {
-    fn regs() -> &'static pac::bstim0::RegisterBlock;
-    fn peripheral() -> Peripheral;
-    fn number() -> usize;
-    fn sr_ptr() -> *mut u32;
+    fn info() -> &'static Info;
 }
 
 /// BSTIMER peripheral instance.
 #[allow(private_bounds)]
-pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
+pub trait Instance: SealedInstance + PeripheralType + Into<AnyBsTimer> + 'static + Send {
     /// Update interrupt for this timer.
     type Interrupt: TypelevelInterrupt;
 }
 
+/// Type-erased BSTIMER token.
+pub struct AnyBsTimer {
+    _private: (),
+}
+
+impl_peripheral!(AnyBsTimer);
+
 macro_rules! impl_instance {
     ($name:ident, $pac:ident, $interrupt:ident, $peripheral:ident, $number:expr, $base:expr) => {
         impl SealedInstance for peripherals::$name {
-            #[inline]
-            fn regs() -> &'static pac::bstim0::RegisterBlock {
-                unsafe { &*pac::$pac::PTR }
+            fn info() -> &'static Info {
+                static INFO: Info = Info {
+                    regs: pac::$pac::PTR,
+                    peripheral: Peripheral::$peripheral,
+                    number: $number,
+                    interrupt: pac::Interrupt::$interrupt,
+                    sr: $base + 0x10,
+                };
+                &INFO
             }
+        }
 
-            #[inline]
-            fn peripheral() -> Peripheral {
-                Peripheral::$peripheral
-            }
-
-            #[inline]
-            fn number() -> usize {
-                $number
-            }
-
-            #[inline]
-            fn sr_ptr() -> *mut u32 {
-                ($base + 0x10) as *mut u32
+        impl From<peripherals::$name> for AnyBsTimer {
+            fn from(_: peripherals::$name) -> Self {
+                Self { _private: () }
             }
         }
 
@@ -129,28 +154,29 @@ pub struct InterruptHandler<T: Instance> {
 
 impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
-        let regs = T::regs();
-        if !regs.sr().read().uif().bit_is_set() {
+        let info = T::info();
+        if !info.regs().sr().read().uif().bit_is_set() {
             return;
         }
 
         // Clear UIF (PAC marks `SR` read-only; GPTIMER uses the same write-0 clear).
-        clear_update_flag_raw(T::sr_ptr());
-        regs.dier().modify(|_, w| w.uie().clear_bit());
-        UPDATE_PENDING[T::number()].store(true, Ordering::Release);
-        WAKERS[T::number()].wake();
+        clear_update_flag_raw(info.sr_ptr());
+        info.regs().dier().modify(|_, w| w.uie().clear_bit());
+        UPDATE_PENDING[info.number].store(true, Ordering::Release);
+        WAKERS[info.number].wake();
     }
 }
 
 /// Owned basic timer.
-pub struct BsTimer<'d, T: Instance, M: Mode = Blocking> {
-    _peri: Peri<'d, T>,
+pub struct BsTimer<'d, M: Mode = Blocking> {
+    _peri: Peri<'d, AnyBsTimer>,
+    info: &'static Info,
     _mode: PhantomData<M>,
 }
 
-impl<'d, T: Instance> BsTimer<'d, T, Blocking> {
+impl<'d> BsTimer<'d, Blocking> {
     /// Enable clocks, release reset, apply `config`, and leave the timer stopped.
-    pub fn new_blocking(peri: Peri<'d, T>, config: Config) -> Self {
+    pub fn new_blocking<T: Instance>(peri: Peri<'d, T>, config: Config) -> Self {
         let mut this = Self::create(peri);
         this.configure(config);
         this
@@ -163,13 +189,18 @@ impl<'d, T: Instance> BsTimer<'d, T, Blocking> {
     }
 }
 
-impl<'d, T: Instance> BsTimer<'d, T, Async> {
+impl<'d> BsTimer<'d, Async> {
     /// Enable clocks, release reset, apply `config`, and bind the update IRQ.
-    pub fn new(peri: Peri<'d, T>, _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd, config: Config) -> Self {
-        UPDATE_PENDING[T::number()].store(false, Ordering::Release);
-        T::Interrupt::unpend();
-        T::Interrupt::set_priority(Priority::P3);
-        unsafe { T::Interrupt::enable() };
+    pub fn new<T: Instance>(
+        peri: Peri<'d, T>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        config: Config,
+    ) -> Self {
+        let info = T::info();
+        UPDATE_PENDING[info.number].store(false, Ordering::Release);
+        info.interrupt.unpend();
+        info.interrupt.set_priority(Priority::P3);
+        unsafe { info.interrupt.enable() };
 
         let mut this = Self::create(peri);
         this.configure(config);
@@ -180,22 +211,22 @@ impl<'d, T: Instance> BsTimer<'d, T, Async> {
     ///
     /// Enables `DIER.UIE` until [`InterruptHandler`] observes `SR.UIF`.
     pub async fn wait_for_update(&mut self) {
-        let index = T::number();
-        UPDATE_PENDING[index].store(false, Ordering::Release);
-        clear_update_flag_raw(T::sr_ptr());
+        let info = self.info;
+        UPDATE_PENDING[info.number].store(false, Ordering::Release);
+        clear_update_flag_raw(info.sr_ptr());
 
-        let _uie = UpdateInterruptGuard::<T>::arm();
+        let _uie = UpdateInterruptGuard::arm(info);
 
         poll_fn(|cx| {
-            WAKERS[index].register(cx.waker());
+            WAKERS[info.number].register(cx.waker());
 
-            if UPDATE_PENDING[index].swap(false, Ordering::AcqRel) {
+            if UPDATE_PENDING[info.number].swap(false, Ordering::AcqRel) {
                 return Poll::Ready(());
             }
 
             // Already latched before / while UIE was armed.
-            if T::regs().sr().read().uif().bit_is_set() {
-                clear_update_flag_raw(T::sr_ptr());
+            if info.regs().sr().read().uif().bit_is_set() {
+                clear_update_flag_raw(info.sr_ptr());
                 return Poll::Ready(());
             }
 
@@ -205,19 +236,21 @@ impl<'d, T: Instance> BsTimer<'d, T, Async> {
     }
 }
 
-impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
-    fn create(peri: Peri<'d, T>) -> Self {
-        let _ = rcc::enable_peripheral(T::peripheral());
-        let _ = rcc::reset_peripheral(T::peripheral());
+impl<'d, M: Mode> BsTimer<'d, M> {
+    fn create<T: Instance>(peri: Peri<'d, T>) -> Self {
+        let info = T::info();
+        let _ = rcc::enable_peripheral(info.peripheral);
+        let _ = rcc::reset_peripheral(info.peripheral);
         Self {
-            _peri: peri,
+            _peri: peri.into(),
+            info,
             _mode: PhantomData,
         }
     }
 
     /// Apply configuration while the counter is left as-is (vendor `bstimer_init`).
     pub fn configure(&mut self, config: Config) {
-        let regs = T::regs();
+        let regs = self.info.regs();
 
         regs.cr2().modify(|_, w| match config.master_mode {
             MasterMode::Reset => w.mms().reset(),
@@ -245,43 +278,43 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
 
     /// Start the counter (`CR1.CEN`).
     pub fn start(&mut self) {
-        T::regs().cr1().modify(|_, w| w.cen().set_bit());
+        self.info.regs().cr1().modify(|_, w| w.cen().set_bit());
     }
 
     /// Stop the counter (`CR1.CEN`).
     pub fn stop(&mut self) {
-        T::regs().cr1().modify(|_, w| w.cen().clear_bit());
+        self.info.regs().cr1().modify(|_, w| w.cen().clear_bit());
     }
 
     /// Enable or disable one-pulse mode (`CR1.OPM`).
     pub fn set_one_pulse(&mut self, enabled: bool) {
-        T::regs().cr1().modify(|_, w| w.opm().bit(enabled));
+        self.info.regs().cr1().modify(|_, w| w.opm().bit(enabled));
     }
 
     /// When enabled, only counter overflow/underflow generates update events
     /// that set UIF (`CR1.URS`, vendor `bstimer_config_overflow_update`).
     pub fn set_overflow_update(&mut self, enabled: bool) {
-        T::regs().cr1().modify(|_, w| w.urs().bit(enabled));
+        self.info.regs().cr1().modify(|_, w| w.urs().bit(enabled));
     }
 
     /// Disable generation of update events (`CR1.UDIS`).
     pub fn set_update_disabled(&mut self, disabled: bool) {
-        T::regs().cr1().modify(|_, w| w.udis().bit(disabled));
+        self.info.regs().cr1().modify(|_, w| w.udis().bit(disabled));
     }
 
     /// Enable or disable DMA requests on update (`DIER.UDE`).
     pub fn set_dma_request(&mut self, enabled: bool) {
-        T::regs().dier().modify(|_, w| w.ude().bit(enabled));
+        self.info.regs().dier().modify(|_, w| w.ude().bit(enabled));
     }
 
     /// Enable or disable the update interrupt (`DIER.UIE`).
     pub fn set_update_interrupt(&mut self, enabled: bool) {
-        T::regs().dier().modify(|_, w| w.uie().bit(enabled));
+        self.info.regs().dier().modify(|_, w| w.uie().bit(enabled));
     }
 
     /// Whether `SR.UIF` is set.
     pub fn update_flag(&self) -> bool {
-        T::regs().sr().read().uif().bit_is_set()
+        self.info.regs().sr().read().uif().bit_is_set()
     }
 
     /// Clear `SR.UIF`.
@@ -290,38 +323,38 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     /// `SR &= ~UIF`. The PAC marks `SR` read-only, so use the raw write
     /// that matches GPTIMER's `timer_clear_status` (write-0 to the flag).
     pub fn clear_update_flag(&mut self) {
-        clear_update_flag_raw(T::sr_ptr());
+        clear_update_flag_raw(self.info.sr_ptr());
     }
 
     /// Generate an update event (`EGR.UG`), reloading the prescaler shadow.
     /// EGR has field accessor for UG.
     pub fn generate_update(&self) {
         unsafe {
-            T::regs().egr().write_with_zero(|w| w.ug().set_bit());
+            self.info.regs().egr().write_with_zero(|w| w.ug().set_bit());
         }
     }
 
     /// Current counter value.
     pub fn counter(&self) -> u32 {
-        u32::from(T::regs().cnt().read().cnt().bits())
+        u32::from(self.info.regs().cnt().read().cnt().bits())
     }
 
     /// Write the counter register.
     pub fn set_counter(&mut self, value: u32) {
         // CNT is wider than the 16-bit value field; truncate explicitly.
         unsafe {
-            T::regs().cnt().write_with_zero(|w| w.cnt().bits(value as u16));
+            self.info.regs().cnt().write_with_zero(|w| w.cnt().bits(value as u16));
         }
     }
 
     /// Current auto-reload value.
     pub fn period(&self) -> u32 {
-        u32::from(T::regs().arr().read().arr().bits())
+        u32::from(self.info.regs().arr().read().arr().bits())
     }
 
     /// Current prescaler value.
     pub fn prescaler(&self) -> u32 {
-        u32::from(T::regs().psc().read().psc().bits())
+        u32::from(self.info.regs().psc().read().psc().bits())
     }
 
     /// Configure one-pulse mode as in the vendor `bstimer/onepulse` example:
@@ -334,7 +367,7 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     }
 }
 
-impl<'d, T: Instance, M: Mode> embassy_embedded_hal::SetConfig for BsTimer<'d, T, M> {
+impl<'d, M: Mode> embassy_embedded_hal::SetConfig for BsTimer<'d, M> {
     type Config = Config;
     type ConfigError = core::convert::Infallible;
 
@@ -344,31 +377,31 @@ impl<'d, T: Instance, M: Mode> embassy_embedded_hal::SetConfig for BsTimer<'d, T
     }
 }
 
-impl<'d, T: Instance, M: Mode> Drop for BsTimer<'d, T, M> {
+impl<'d, M: Mode> Drop for BsTimer<'d, M> {
     fn drop(&mut self) {
         self.stop();
         self.set_update_interrupt(false);
         self.clear_update_flag();
-        T::Interrupt::disable();
-        UPDATE_PENDING[T::number()].store(false, Ordering::Release);
-        let _ = rcc::disable_peripheral(T::peripheral());
+        self.info.interrupt.disable();
+        UPDATE_PENDING[self.info.number].store(false, Ordering::Release);
+        let _ = rcc::disable_peripheral(self.info.peripheral);
     }
 }
 
-struct UpdateInterruptGuard<T: Instance> {
-    _phantom: PhantomData<T>,
+struct UpdateInterruptGuard {
+    info: &'static Info,
 }
 
-impl<T: Instance> UpdateInterruptGuard<T> {
-    fn arm() -> Self {
-        T::regs().dier().modify(|_, w| w.uie().set_bit());
-        Self { _phantom: PhantomData }
+impl UpdateInterruptGuard {
+    fn arm(info: &'static Info) -> Self {
+        info.regs().dier().modify(|_, w| w.uie().set_bit());
+        Self { info }
     }
 }
 
-impl<T: Instance> Drop for UpdateInterruptGuard<T> {
+impl Drop for UpdateInterruptGuard {
     fn drop(&mut self) {
-        T::regs().dier().modify(|_, w| w.uie().clear_bit());
+        self.info.regs().dier().modify(|_, w| w.uie().clear_bit());
     }
 }
 
