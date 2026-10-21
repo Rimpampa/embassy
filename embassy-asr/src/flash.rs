@@ -86,7 +86,7 @@ impl<'d> Flash<'d> {
 
     /// Erase one 4 KiB page.
     pub fn erase_page(&mut self, offset: u32) -> Result<(), Error> {
-        if offset % PAGE_SIZE != 0 || offset >= self.size {
+        if !offset.is_multiple_of(PAGE_SIZE) || offset >= self.size {
             return Err(Error::Address);
         }
         let addr = FLASH_BASE + offset;
@@ -130,7 +130,7 @@ impl<'d> Flash<'d> {
     /// The offset must be 8-byte aligned. Trailing bytes that do not fill an
     /// 8-byte unit are padded with `0xFF`, matching the vendor driver.
     pub fn program(&mut self, offset: u32, data: &[u8]) -> Result<(), Error> {
-        if offset % WRITE_SIZE != 0 || offset >= self.size {
+        if !offset.is_multiple_of(WRITE_SIZE) || offset >= self.size {
             return Err(Error::Address);
         }
         if data.is_empty() {
@@ -245,7 +245,7 @@ impl NorFlash for Flash<'_> {
     const ERASE_SIZE: usize = PAGE_SIZE as usize;
 
     fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-        if from % PAGE_SIZE != 0 || to % PAGE_SIZE != 0 || from >= to || to > self.size {
+        if !from.is_multiple_of(PAGE_SIZE) || !to.is_multiple_of(PAGE_SIZE) || from >= to || to > self.size {
             return Err(Error::Address);
         }
         let mut offset = from;
@@ -257,7 +257,7 @@ impl NorFlash for Flash<'_> {
     }
 
     fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-        if bytes.len() % WRITE_SIZE as usize != 0 {
+        if !bytes.len().is_multiple_of(WRITE_SIZE as usize) {
             return Err(Error::Length);
         }
         self.program(offset, bytes)

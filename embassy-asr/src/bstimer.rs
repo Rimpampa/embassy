@@ -310,9 +310,7 @@ impl<'d, T: Instance, M: Mode> BsTimer<'d, T, M> {
     pub fn set_counter(&mut self, value: u32) {
         // CNT is wider than the 16-bit value field; truncate explicitly.
         unsafe {
-            T::regs()
-                .cnt()
-                .write_with_zero(|w| w.cnt().bits(value as u16));
+            T::regs().cnt().write_with_zero(|w| w.cnt().bits(value as u16));
         }
     }
 

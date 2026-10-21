@@ -9,8 +9,8 @@
 //! LPUART is clocked from the always-on domain (`XO32K`, `RCO32K`, or
 //! `RCO4M`). Select the source with [`Config::clock_source`]. The selected
 //! oscillator must already be running; this driver does not power oscillators.
-//! With `time-driver-rtc`, `XO32K` is typically already enabled by
-//! [`crate::init`].
+//! When the system clock uses `XO32K`, or when `time-driver-lptim0` is active,
+//! `XO32K` is typically already enabled by [`crate::init`].
 //!
 //! # Wakeup (STOP)
 //!
@@ -35,9 +35,9 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, Ordering, compiler_fence};
 use core::task::Poll;
 
+use embassy_hal_internal::Peri;
 use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::interrupt::Priority;
-use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::dma::{self, Channel as DmaChannel, Request, TransferOptions};
@@ -1199,8 +1199,6 @@ impl<'d> LpuartRx<'d, Async> {
     }
 }
 
-
-
 impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Lpuart<'d, M> {
     type Config = Config;
     type ConfigError = ConfigError;
@@ -1335,30 +1333,6 @@ impl<'d> embedded_io_async::Read for Lpuart<'d, Async> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         embedded_io_async::Read::read(&mut self.rx, buf).await
     }
-}
-
-// --- Instance --------------------------------------------------------------
-
-trait SealedInstance {
-    fn info() -> &'static Info;
-}
-
-/// LPUART instance.
-#[allow(private_bounds, private_interfaces)]
-pub trait Instance: SealedInstance + PeripheralType + 'static + Send {
-    /// NVIC vector for LPUART.
-    type Interrupt: Interrupt;
-}
-
-#[allow(private_interfaces)]
-impl SealedInstance for peripherals::LPUART {
-    fn info() -> &'static Info {
-        info()
-    }
-}
-
-impl Instance for peripherals::LPUART {
-    type Interrupt = interrupt::typelevel::LPUART;
 }
 
 // --- embedded-hal 0.2 blocking traits ----------------------------------------

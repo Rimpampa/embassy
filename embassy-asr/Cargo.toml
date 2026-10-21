@@ -2,19 +2,22 @@
 name = "embassy-asr"
 version = "0.1.0"
 edition = "2024"
-description = "Embassy support for ASR microcontrollers"
+description = "Embassy Hardware Abstraction Layer (HAL) for ASR6601 microcontrollers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/embassy-rs/embassy"
 documentation = "https://docs.embassy.dev/embassy-asr"
+keywords = ["embedded", "async", "asr6601", "hal", "embedded-hal"]
+categories = ["embedded", "hardware-support", "no-std", "asynchronous"]
+publish = false
 
 [package.metadata.embassy]
 build = [
-    { target = "thumbv7em-none-eabihf", features = ["asr6601", "time-driver-lptim0"] },
+    { target = "thumbv7em-none-eabihf", features = ["defmt", "asr6601", "time-driver-lptim0"] },
 ]
 
 [package.metadata.embassy_docs]
-src_base = "https://github.com/Rimpampa/embassy/blob/dev/embassy-asr/src/"
-src_base_git = "https://github.com/Rimpampa/embassy/blob/$COMMIT/embassy-asr/src/"
+src_base = "https://github.com/embassy-rs/embassy/blob/embassy-asr-v$VERSION/embassy-asr/src/"
+src_base_git = "https://github.com/embassy-rs/embassy/blob/$COMMIT/embassy-asr/src/"
 
 features = ["defmt", "asr6601", "time-driver-lptim0"]
 flavors = [
@@ -22,7 +25,7 @@ flavors = [
 ]
 
 [package.metadata.docs.rs]
-features = ["asr6601", "time-driver-lptim0"]
+features = ["defmt", "asr6601", "time-driver-lptim0"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -64,15 +67,6 @@ defmt = [
 ]
 
 _time-driver = ["dep:embassy-time-driver", "dep:embassy-time-queue-utils"]
-
-# RTC is clocked from the always-on XO32K domain. Its calendar provides the
-# monotonic clock and its cyclic counter wakes the processor for deadlines.
-# Deprecated: use `time-driver-lptim0` instead.
-time-driver-rtc = [
-    "_time-driver",
-    "asr6601",
-    "embassy-time-driver?/tick-hz-32_768",
-]
 
 # LPTIM0 is clocked from the always-on XO32K domain. Its 16-bit counter
 # provides the monotonic clock and its compare channel wakes the processor.

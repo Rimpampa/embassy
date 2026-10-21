@@ -380,14 +380,6 @@ fn interrupt_mask(pin: u8) -> u32 {
 }
 
 #[inline]
-fn clear_interrupt(port: Port, pin: u8) {
-    let mask = interrupt_mask(pin);
-    unsafe {
-        regs(port).fr().write_with_zero(|w| w.bits(mask));
-    }
-}
-
-#[inline]
 fn set_interrupt(port: Port, pin: u8, mode: u32) {
     let mask = interrupt_mask(pin);
     let value = mode << (pin as u32 * 2);
@@ -688,9 +680,7 @@ impl<'d, M: Mode> Flex<'d, M> {
 
         if emulated {
             unsafe {
-                regs(self.port())
-                    .brr()
-                    .write_with_zero(|w| w.br().bits(mask as u16));
+                regs(self.port()).brr().write_with_zero(|w| w.br().bits(mask as u16));
             }
         }
     }
@@ -850,9 +840,7 @@ impl<'d, M: Mode> Flex<'d, M> {
                 .modify(|r, w| unsafe { w.bits(r.bits() | mask) });
         } else {
             unsafe {
-                regs(self.port())
-                    .bsrr()
-                    .write_with_zero(|w| w.bsr().bits(mask as u16));
+                regs(self.port()).bsrr().write_with_zero(|w| w.bsr().bits(mask as u16));
             }
         }
     }
@@ -868,9 +856,7 @@ impl<'d, M: Mode> Flex<'d, M> {
             gpio.oer().modify(|r, w| unsafe { w.bits(r.bits() & !mask) });
         } else {
             unsafe {
-                regs(self.port())
-                    .brr()
-                    .write_with_zero(|w| w.br().bits(mask as u16));
+                regs(self.port()).brr().write_with_zero(|w| w.br().bits(mask as u16));
             }
         }
     }

@@ -632,6 +632,7 @@ impl<'d> Spi<'d, Blocking> {
     }
 
     /// Create a blocking master with explicit alternate-function numbers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_blocking_af<T: Instance>(
         spi: Peri<'d, T>,
         sck: Peri<'d, impl GpioPin + 'd>,
@@ -718,6 +719,7 @@ impl<'d> Spi<'d, Async> {
     }
 
     /// Create an async master with explicit alternate-function numbers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_af<T: Instance>(
         spi: Peri<'d, T>,
         sck: Peri<'d, impl GpioPin + 'd>,
@@ -791,6 +793,7 @@ impl<'d> Spi<'d, Async> {
     ///
     /// Bind both the SSP interrupt (overrun / timeout) and the DMA controller
     /// interrupt(s) used by the supplied channels.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_dma<
         T: Instance,
         Sck: SckPin<T>,
@@ -808,7 +811,6 @@ impl<'d> Spi<'d, Async> {
         irq: impl Binding<T::Interrupt, InterruptHandler<T>>
         + Binding<<TxDma::Controller as ControllerInstance>::Interrupt, dma::InterruptHandler<TxDma::Controller>>
         + Binding<<RxDma::Controller as ControllerInstance>::Interrupt, dma::InterruptHandler<RxDma::Controller>>
-        + Copy
         + 'd,
         config: Config,
     ) -> Result<Self, ConfigError> {
@@ -1060,8 +1062,6 @@ impl<'d> Spi<'d, Async> {
         self.take_error()
     }
 }
-
-
 
 impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Spi<'d, M> {
     type Config = Config;

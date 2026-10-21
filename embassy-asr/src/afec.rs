@@ -145,18 +145,6 @@ pub(crate) mod analog {
             BASE + INDEX * core::mem::size_of::<u32>()
         }
 
-        /// Read the complete analog register.
-        #[inline]
-        pub(crate) fn read(self) -> u32 {
-            critical_section::with(|_| {
-                enable_clock_unlocked();
-
-                // SAFETY: only the validated constants below can be
-                // constructed, and each address follows TREMO_ANALOG_RD.
-                unsafe { read_volatile(self.address() as *const u32) }
-            })
-        }
-
         /// Replace the selected bits and preserve every other bit.
         ///
         /// Bits in `value` outside `mask` are ignored.
@@ -211,27 +199,9 @@ pub(crate) mod analog {
     /// Vendor `tremo_rcc.c`: RCO32K and XO32K control.
     pub(crate) const REG_02: Register<0x02> = Register::new();
 
-    /// Vendor `tremo_pwr.c`: XO32K low-power control.
-    pub(crate) const REG_03: Register<0x03> = Register::new();
-
-    /// Vendor `tremo_pwr.c`: low-power-run control.
-    pub(crate) const REG_05: Register<0x05> = Register::new();
-
     /// Vendor `tremo_rcc.c`, `tremo_pwr.c`, and `tremo_lcd.c`: oscillator,
     /// low-power-run, and LCD analog control.
     pub(crate) const REG_06: Register<0x06> = Register::new();
-
-    /// Vendor `tremo_lcd.c`: LCD COM-count control.
-    pub(crate) const REG_09: Register<0x09> = Register::new();
-
-    /// Vendor `tremo_lcd.c`: LCD COM analog control.
-    pub(crate) const REG_0A: Register<0x0a> = Register::new();
-
-    /// Vendor `tremo_lcd.c`: LCD drive, COM, and segment control.
-    pub(crate) const REG_0B: Register<0x0b> = Register::new();
-
-    /// Vendor `tremo_pwr.c`: STOP3 preparation.
-    pub(crate) const REG_0C: Register<0x0c> = Register::new();
 
     /// Vendor `tremo_adc.c` and `tremo_dac.c`: ADC and DAC analog control.
     pub(crate) const REG_11: Register<0x11> = Register::new();

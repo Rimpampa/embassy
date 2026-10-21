@@ -93,11 +93,12 @@ impl DataWidth {
 /// Number of items in a DMA burst.
 ///
 /// These are the burst sizes documented by the ASR vendor driver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum BurstSize {
     /// One item per burst.
+    #[default]
     One = 0,
     /// Four items per burst.
     Four = 1,
@@ -372,12 +373,6 @@ pub struct TransferOptions {
     pub source_burst: BurstSize,
     /// Destination burst size.
     pub destination_burst: BurstSize,
-}
-
-impl Default for BurstSize {
-    fn default() -> Self {
-        Self::One
-    }
 }
 
 /// DMA configuration or transfer error.
@@ -1296,10 +1291,10 @@ fn validate_transfer(
     if transfer_count > MAX_TRANSFER_COUNT {
         return Err(Error::TooManyTransfers);
     }
-    if source as usize % config.source_width.bytes() != 0 {
+    if !(source as usize).is_multiple_of(config.source_width.bytes()) {
         return Err(Error::SourceMisaligned);
     }
-    if destination as usize % config.destination_width.bytes() != 0 {
+    if !(destination as usize).is_multiple_of(config.destination_width.bytes()) {
         return Err(Error::DestinationMisaligned);
     }
     address_to_u32(source as usize)?;

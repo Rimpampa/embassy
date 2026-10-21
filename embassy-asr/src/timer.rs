@@ -687,7 +687,7 @@ fn configure_capture_channel<T: Instance>(channel: Channel, polarity: CapturePol
             w
         }),
     };
-    let filter_mask = if channel.index() % 2 == 0 {
+    let filter_mask = if channel.index().is_multiple_of(2) {
         CCMR_IC_FILTER_MASK_EVEN
     } else {
         CCMR_IC_FILTER_MASK_ODD
@@ -1022,6 +1022,7 @@ pub struct SimplePwm<'d, T: Instance> {
 
 impl<'d, T: Instance> SimplePwm<'d, T> {
     /// Create a PWM timer at `frequency`, optionally attaching channel pins.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peri: Peri<'d, T>,
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>> + 'd,

@@ -26,6 +26,8 @@ use crate::rcc::{self, Peripheral as RccPeripheral};
 const TIMER_TICK_HZ: u64 = 32_768;
 const ARR_MAX: u16 = 0xFFFF;
 
+const _: () = assert!(TICK_HZ == TIMER_TICK_HZ);
+
 // Vendor `tremo_lptimer.h` bit definitions (also in RM). ISR, CSR, CFGR, CR,
 // CMP, ARR, CNT, SR1, IER and ICR all have PAC field accessors, used below.
 // The numeric masks that remain feed the private `wait_isr`/`wait_csr`
@@ -104,8 +106,6 @@ fn wait_csr(mask: u32) {
 
 impl LptimTimeDriver {
     fn init(&'static self) {
-        assert!(TICK_HZ == TIMER_TICK_HZ, "embassy-asr: time tick rate must be 32768 Hz");
-
         // XO32K is in the always-on domain. Clear its AFEC power-down bits
         // (matches vendor `rcc_enable_oscillator(RCC_OSC_XO32K)`).
         afec::analog::REG_02.clear_bits(ANALOG_XO32K_POWER_DOWN);
@@ -175,7 +175,7 @@ impl LptimTimeDriver {
         // PRESC /1 is missing in PAC/SVD; program raw bits from tremo_lptimer.h.
         lptim()
             .cfgr()
-            .modify(|r, w| unsafe { w.bits((r.bits() & !CFGR_PRESC_MASK) | 0x0) });
+            .modify(|r, w| unsafe { w.bits(r.bits() & !CFGR_PRESC_MASK) });
         wait_isr(ISR_CFGROK);
 
         // Enable peripheral.
@@ -224,11 +224,7 @@ impl LptimTimeDriver {
         // Called with interrupts masked to avoid tearing across overflow.
         let period = self.period.load(Ordering::Relaxed);
         let cnt = lptim().cnt().read().cnt().bits() as u16 as u64;
-        let pending = if lptim().isr().read().arrm().bit_is_set() {
-            1
-        } else {
-            0
-        };
+        let pending = if lptim().isr().read().arrm().bit_is_set() { 1 } else { 0 };
         ((period as u64 + pending as u64) << 16) | cnt
     }
 

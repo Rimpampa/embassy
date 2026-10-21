@@ -74,22 +74,6 @@ struct IrqEnables {
     trans_done: bool,
 }
 
-impl IrqEnables {
-    /// Error enables armed by every wait.
-    const fn errors() -> Self {
-        Self {
-            arb_loss: true,
-            tx_empty: false,
-            rx_full: false,
-            bus_error: true,
-            slave_addr: false,
-            slave_stop: false,
-            master_stop: false,
-            trans_done: false,
-        }
-    }
-}
-
 /// `SR` bit 13 (`RW_MODE`): set when the matched address had the R/W bit set
 /// (master read / slave transmit). The SVD and the vendor `tremo_regs.h`
 /// (`I2C_SR_RW_MODE_MASK 0x2000`) agree on bit 13, but the PAC skips it —
@@ -650,6 +634,7 @@ impl<'d> I2c<'d, Blocking> {
     }
 
     /// Create a blocking master with explicit alternate-function numbers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_blocking_af<T: Instance>(
         peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -677,6 +662,7 @@ impl<'d> I2c<'d, Async> {
     }
 
     /// Create an async master with explicit alternate-function numbers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_af<T: Instance>(
         peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -705,6 +691,7 @@ impl<'d, M: Mode> I2c<'d, M> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner<T: Instance>(
         _peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -1215,8 +1202,6 @@ impl<'d> I2c<'d, Async> {
     }
 }
 
-
-
 impl<'d, M: Mode> embassy_embedded_hal::SetConfig for I2c<'d, M> {
     type Config = Config;
     type ConfigError = Error;
@@ -1254,6 +1239,7 @@ impl<'d> I2cSlave<'d, Blocking> {
     }
 
     /// Create a blocking slave with explicit alternate-function numbers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_blocking_af<T: Instance>(
         peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -1283,6 +1269,7 @@ impl<'d> I2cSlave<'d, Async> {
     }
 
     /// Create an async slave with explicit alternate-function numbers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_af<T: Instance>(
         peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,
@@ -1313,6 +1300,7 @@ impl<'d, M: Mode> I2cSlave<'d, M> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner<T: Instance>(
         _peri: Peri<'d, T>,
         scl: Peri<'d, impl GpioPin + 'd>,

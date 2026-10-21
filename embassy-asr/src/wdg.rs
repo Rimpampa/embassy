@@ -45,8 +45,7 @@ impl<'d> Watchdog<'d> {
 
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
-            rcc.rst_cr()
-                .modify(|_, w| w.wwdg_reset_req_en().set_bit());
+            rcc.rst_cr().modify(|_, w| w.wwdg_reset_req_en().set_bit());
         });
     }
 
@@ -61,8 +60,7 @@ impl<'d> Watchdog<'d> {
     pub fn stop(&mut self) {
         critical_section::with(|_| {
             let rcc = unsafe { pac::Rcc::steal() };
-            rcc.rst_cr()
-                .modify(|_, w| w.wwdg_reset_req_en().clear_bit());
+            rcc.rst_cr().modify(|_, w| w.wwdg_reset_req_en().clear_bit());
         });
 
         unlock();

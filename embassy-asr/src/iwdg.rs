@@ -113,10 +113,10 @@ impl<'d> IndependentWatchdog<'d> {
         if config.reload > MAX_RELOAD {
             return Err(ConfigError::InvalidReload);
         }
-        if let Some(window) = config.window {
-            if window > MAX_RELOAD {
-                return Err(ConfigError::InvalidWindow);
-            }
+        if let Some(window) = config.window
+            && window > MAX_RELOAD
+        {
+            return Err(ConfigError::InvalidWindow);
         }
         let regs = Self::regs();
         wait_sr_done();

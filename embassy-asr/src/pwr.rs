@@ -370,7 +370,8 @@ impl<'d> Pwr<'d> {
 
         // CR1 bit 4 (deep-sleep enable) has no PAC accessor; set it raw,
         // then program the trim field through its accessor.
-        pwr.cr1().modify(|r, w| unsafe { w.bits(r.bits() | CR1_DEEP_SLEEP_ENABLE) });
+        pwr.cr1()
+            .modify(|r, w| unsafe { w.bits(r.bits() | CR1_DEEP_SLEEP_ENABLE) });
         if core::ptr::read_volatile(FLASH_INFO_TRIM) & 0x03 == 0 {
             unsafe {
                 pwr.cr1().modify(|_, w| w.trim().bits(1));
@@ -389,20 +390,16 @@ impl<'d> Pwr<'d> {
             modify_analog(AFEC_STOP3_CONTROL, |value| value | STOP3_ANALOG_ENABLE);
 
             unsafe {
-                pwr.cr0()
-                    .modify(|_, w| w.low_power_mode().bits(cr0_mode));
+                pwr.cr0().modify(|_, w| w.low_power_mode().bits(cr0_mode));
             }
-            pwr.cr1().modify(|_, w| {
-                match mode {
-                    DeepSleepMode::Stop3 => w.lp_mode_ext().set_bit(),
-                    DeepSleepMode::Standby => w.lp_mode_ext().clear_bit(),
-                    _ => w,
-                }
+            pwr.cr1().modify(|_, w| match mode {
+                DeepSleepMode::Stop3 => w.lp_mode_ext().set_bit(),
+                DeepSleepMode::Standby => w.lp_mode_ext().clear_bit(),
+                _ => w,
             });
         } else {
             unsafe {
-                pwr.cr0()
-                    .modify(|_, w| w.low_power_mode().bits(cr0_mode));
+                pwr.cr0().modify(|_, w| w.low_power_mode().bits(cr0_mode));
             }
         }
     }

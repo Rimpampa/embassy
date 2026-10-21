@@ -956,28 +956,28 @@ fn clear_icr_flags(regs: &pac::lptim0::RegisterBlock, pending: u32) {
     // `write_with_zero` is unsafe on W1C registers in the PAC.
     unsafe {
         regs.icr().write_with_zero(|w| {
-        if pending & ISR_CMPM != 0 {
-            w.cmpmcf().set_bit();
-        }
-        if pending & ISR_ARRM != 0 {
-            w.arrmcf().set_bit();
-        }
-        if pending & ISR_EXTTRIG != 0 {
-            w.exttrigcf().set_bit();
-        }
-        if pending & ISR_CMPOK != 0 {
-            w.cmpokcf().set_bit();
-        }
-        if pending & ISR_ARROK != 0 {
-            w.arrokcf().set_bit();
-        }
-        if pending & ISR_UP != 0 {
-            w.upcf().set_bit();
-        }
-        if pending & ISR_DOWN != 0 {
-            w.downcf().set_bit();
-        }
-        w
+            if pending & ISR_CMPM != 0 {
+                w.cmpmcf().set_bit();
+            }
+            if pending & ISR_ARRM != 0 {
+                w.arrmcf().set_bit();
+            }
+            if pending & ISR_EXTTRIG != 0 {
+                w.exttrigcf().set_bit();
+            }
+            if pending & ISR_CMPOK != 0 {
+                w.cmpokcf().set_bit();
+            }
+            if pending & ISR_ARROK != 0 {
+                w.arrokcf().set_bit();
+            }
+            if pending & ISR_UP != 0 {
+                w.upcf().set_bit();
+            }
+            if pending & ISR_DOWN != 0 {
+                w.downcf().set_bit();
+            }
+            w
         });
     }
 }
@@ -1042,10 +1042,13 @@ fn set_instance_clock_source<T: Instance>(source: ClockSource) -> Result<(), Err
 }
 
 /// Documented LPTIMER `IN1` pin for an instance.
+#[allow(private_bounds)]
 pub trait In1Pin<T: Instance>: gpio::Pin + SealedAfPin {}
 /// Documented LPTIMER `IN2` pin for an instance.
+#[allow(private_bounds)]
 pub trait In2Pin<T: Instance>: gpio::Pin + SealedAfPin {}
 /// Documented LPTIMER `ETR` pin for an instance.
+#[allow(private_bounds)]
 pub trait EtrPin<T: Instance>: gpio::Pin + SealedAfPin {}
 
 macro_rules! impl_lptimer0_pin {

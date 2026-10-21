@@ -186,7 +186,7 @@ impl<T: Instance> Handler<T::Interrupt> for InterruptHandler<T> {
                 }
                 unsafe {
                     let buf = info.state.rx_buf.get();
-                    *(&raw mut (*buf)[head]) = b;
+                    (*buf)[head] = b;
                 }
                 info.state.rx_head.store(next as u16, Ordering::Release);
             }
@@ -814,8 +814,6 @@ impl<'d, M: Mode> Uart<'d, M> {
         self.tx.busy()
     }
 
-
-
     /// Change the baud rate.
     pub fn set_baudrate(&mut self, baudrate: u32) -> Result<(), ConfigError> {
         self.tx.set_baudrate(baudrate)
@@ -869,13 +867,21 @@ impl<'d, M: Mode> UartTx<'d, M> {
         let regs = self.regs();
         let info = self.info;
         let uart_clk = if info.pclk0 {
-            crate::rcc::clocks().map(|c| c.pclk0_hz).ok_or(ConfigError::ClocksNotInitialized)?
+            crate::rcc::clocks()
+                .map(|c| c.pclk0_hz)
+                .ok_or(ConfigError::ClocksNotInitialized)?
         } else {
-            crate::rcc::clocks().map(|c| c.pclk1_hz).ok_or(ConfigError::ClocksNotInitialized)?
+            crate::rcc::clocks()
+                .map(|c| c.pclk1_hz)
+                .ok_or(ConfigError::ClocksNotInitialized)?
         };
         let (ibrd, fbrd) = calc_baud_div(uart_clk, baudrate).ok_or(ConfigError::Baudrate)?;
-        unsafe { regs.ibrd().write_with_zero(|w| w.bits(ibrd)); };
-        unsafe { regs.fbrd().write_with_zero(|w| w.bits(fbrd)); };
+        unsafe {
+            regs.ibrd().write_with_zero(|w| w.bits(ibrd));
+        };
+        unsafe {
+            regs.fbrd().write_with_zero(|w| w.bits(fbrd));
+        };
         // LCR_H write is needed to latch the new baud rate divisors
         regs.lcr_h().modify(|r, w| unsafe { w.bits(r.bits()) });
         Ok(())
@@ -1116,7 +1122,7 @@ impl<'d> UartRx<'d, Async> {
         if tail == info.state.rx_head.load(Ordering::Acquire) as usize {
             return Ok(None);
         }
-        let b = unsafe { *(&raw const (*info.state.rx_buf.get())[tail]) };
+        let b = unsafe { (*info.state.rx_buf.get())[tail] };
         info.state
             .rx_tail
             .store(((tail + 1) % RX_BUF_CAP) as u16, Ordering::Release);
@@ -1157,8 +1163,6 @@ impl<'d> UartRx<'d, Async> {
         result
     }
 }
-
-
 
 impl<'d, M: Mode> embassy_embedded_hal::SetConfig for Uart<'d, M> {
     type Config = Config;

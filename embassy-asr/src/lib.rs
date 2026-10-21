@@ -1,5 +1,8 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
+// The generated interrupt type-level trait has an unsafe `enable` method whose
+// safety contract is documented by the interrupt module rather than the trait.
+#![allow(clippy::missing_safety_doc)]
 #![warn(missing_docs)]
 
 //! Embassy support for ASR microcontrollers.
@@ -20,7 +23,7 @@ pub mod pac {
     }
 }
 
-#[cfg(any(feature = "time-driver-rtc", feature = "time-driver-lptim0"))]
+#[cfg(feature = "time-driver-lptim0")]
 mod time_driver;
 
 #[cfg(feature = "asr6601")]
@@ -204,7 +207,6 @@ embassy_hal_internal::peripherals! {
     BSTIMER1,
     LPTIMER0,
     LPTIMER1,
-    #[cfg(not(feature = "time-driver-rtc"))]
     RTC,
 
     // Analog and display
@@ -231,6 +233,7 @@ embassy_hal_internal::peripherals! {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// Oscillator and core/bus clock configuration.
+    #[cfg(feature = "asr6601")]
     pub rcc: rcc::Config,
 }
 
@@ -238,6 +241,7 @@ impl Config {
     /// Create the default HAL configuration.
     pub const fn new() -> Self {
         Self {
+            #[cfg(feature = "asr6601")]
             rcc: rcc::Config::new(),
         }
     }
@@ -253,7 +257,6 @@ impl Default for Config {
 ///
 /// With `time-driver-lptim0` enabled, this resets and uses LPTIM0 exclusively
 /// for Embassy time. Applications must not access LPTIM0 through the raw PAC.
-/// With deprecated `time-driver-rtc`, RTC is used instead.
 pub fn init(config: Config) -> Peripherals {
     let peripherals = Peripherals::take();
 
@@ -268,7 +271,10 @@ pub fn init(config: Config) -> Peripherals {
         }
     }
 
-    #[cfg(any(feature = "time-driver-rtc", feature = "time-driver-lptim0"))]
+    #[cfg(not(feature = "asr6601"))]
+    let _ = config;
+
+    #[cfg(feature = "time-driver-lptim0")]
     crate::time_driver::init();
 
     unsafe {
