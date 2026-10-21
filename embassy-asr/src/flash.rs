@@ -9,8 +9,7 @@ use embedded_storage::nor_flash::{
     ErrorType, MultiwriteNorFlash, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
 };
 
-use crate::sec::flash_access;
-use crate::{Peri, pac, peripherals};
+use crate::{Peri, pac, peripherals, sec};
 
 const FLASH_BASE: u32 = 0x0800_0000;
 const FLASH_SIZE_TAG_ADDR: u32 = 0x1000_2010;
@@ -61,9 +60,9 @@ pub struct Flash<'d> {
 
 impl Drop for Flash<'_> {
     fn drop(&mut self) {
-        // Nothing to tear down: the EFC has no RCC gate in this HAL, and an
-        // in-progress program/erase runs to completion in hardware once
-        // started (all blocking calls poll it before returning).
+        // The EFC has no RCC gate in this HAL. Release the shared SEC clock
+        // used for access-error reporting.
+        sec::release_clock();
     }
 }
 
@@ -74,6 +73,9 @@ impl<'d> Flash<'d> {
     /// the SDK / flash algorithm: bits `[1:0] == 0` means 128 KiB, otherwise
     /// 256 KiB.
     pub fn new(peri: Peri<'d, peripherals::EFC>) -> Self {
+        // Flash status reporting reads SEC.SR, so keep the SEC clock alive for
+        // the lifetime of this driver even if no `Sec` handle exists.
+        sec::acquire_clock();
         let tag = unsafe { read_volatile(FLASH_SIZE_TAG_ADDR as *const u32) } & 0x3;
         let size = if tag == 0 { 0x2_0000 } else { 0x4_0000 };
         Self { _peri: peri, size }
@@ -90,7 +92,7 @@ impl<'d> Flash<'d> {
             return Err(Error::Address);
         }
         let addr = FLASH_BASE + offset;
-        flash_access::clear_error();
+        sec::clear_error();
         let efc = Self::regs();
         let ecc_disable = efc.cr().read().ecc_dis().bit_is_set();
         unlock(&efc);
@@ -108,7 +110,7 @@ impl<'d> Flash<'d> {
         unsafe {
             write_volatile(addr as *mut u32, 0xffff_ffff);
         }
-        if flash_access::take_error() {
+        if sec::take_error() {
             return Err(Error::Security);
         }
         wait_done(&efc);
@@ -140,7 +142,7 @@ impl<'d> Flash<'d> {
             return Err(Error::Length);
         }
 
-        flash_access::clear_error();
+        sec::clear_error();
         let efc = Self::regs();
         let ecc_disable = efc.cr().read().ecc_dis().bit_is_set();
         unlock(&efc);
@@ -169,7 +171,7 @@ impl<'d> Flash<'d> {
                 efc.prog_data1().write_with_zero(|w| w.bits(d1));
                 write_volatile((FLASH_BASE + offset + i as u32) as *mut u32, 0xffff_ffff);
             }
-            if flash_access::take_error() {
+            if sec::take_error() {
                 return Err(Error::Security);
             }
             wait_done(&efc);

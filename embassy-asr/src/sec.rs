@@ -4,8 +4,39 @@
 //! checks and clears `SEC.SR.FLASH_ACCESS_ERROR`; this module exposes that
 //! documented status surface and leaves undocumented filter/reset fields alone.
 
+use core::sync::atomic::{AtomicU8, Ordering};
+
 use crate::rcc::{self, Peripheral};
 use crate::{Peri, pac, peripherals};
+
+static CLOCK_USERS: AtomicU8 = AtomicU8::new(0);
+
+/// Acquire the shared SEC clock.
+///
+/// Both the security block driver and the flash driver need the SEC register
+/// window alive. The clock is gated only when the last user releases it.
+pub(crate) fn acquire_clock() {
+    critical_section::with(|_| {
+        let users = CLOCK_USERS.load(Ordering::Relaxed);
+        if users == 0 {
+            let _ = rcc::enable_peripheral(Peripheral::Sec);
+        }
+        CLOCK_USERS.store(users.saturating_add(1), Ordering::Relaxed);
+    });
+}
+
+/// Release the shared SEC clock.
+pub(crate) fn release_clock() {
+    critical_section::with(|_| {
+        let users = CLOCK_USERS.load(Ordering::Relaxed);
+        if users <= 1 {
+            CLOCK_USERS.store(0, Ordering::Relaxed);
+            let _ = rcc::disable_peripheral(Peripheral::Sec);
+        } else {
+            CLOCK_USERS.store(users - 1, Ordering::Relaxed);
+        }
+    });
+}
 
 /// Owned SEC peripheral.
 pub struct Sec<'d> {
@@ -15,7 +46,7 @@ pub struct Sec<'d> {
 impl<'d> Sec<'d> {
     /// Enable the SEC clock.
     pub fn new(peri: Peri<'d, peripherals::SEC>) -> Self {
-        let _ = rcc::enable_peripheral(Peripheral::Sec);
+        acquire_clock();
         Self { _peri: peri }
     }
 
@@ -26,7 +57,7 @@ impl<'d> Sec<'d> {
 
     /// Clear the flash access-policy error flag.
     pub fn clear_flash_access_error(&mut self) {
-        Self::regs().sr().modify(|_, w| w.flash_access_error().set_bit());
+        clear_error();
     }
 
     /// Raw status register value.
@@ -42,27 +73,29 @@ impl<'d> Sec<'d> {
 
 impl Drop for Sec<'_> {
     fn drop(&mut self) {
-        let _ = rcc::disable_peripheral(Peripheral::Sec);
+        release_clock();
     }
 }
 
-/// Crate-private helpers used by the flash driver.
-pub(crate) mod flash_access {
-    use crate::pac;
-
-    pub(crate) fn clear_error() {
-        let sec = unsafe { pac::Sec::steal() };
-        if sec.sr().read().flash_access_error().bit_is_set() {
-            sec.sr().modify(|_, w| w.flash_access_error().set_bit());
+/// Clear the latched flash access error through the W1C status register.
+pub(crate) fn clear_error() {
+    let sec = unsafe { pac::Sec::steal() };
+    if sec.sr().read().flash_access_error().bit_is_set() {
+        // Writing only the W1C bit avoids clearing unrelated SEC flags.
+        unsafe {
+            sec.sr().write_with_zero(|w| w.flash_access_error().set_bit());
         }
     }
+}
 
-    pub(crate) fn take_error() -> bool {
-        let sec = unsafe { pac::Sec::steal() };
-        let error = sec.sr().read().flash_access_error().bit_is_set();
-        if error {
-            sec.sr().modify(|_, w| w.flash_access_error().set_bit());
+/// Return whether a flash access error is latched, clearing it if so.
+pub(crate) fn take_error() -> bool {
+    let sec = unsafe { pac::Sec::steal() };
+    let error = sec.sr().read().flash_access_error().bit_is_set();
+    if error {
+        unsafe {
+            sec.sr().write_with_zero(|w| w.flash_access_error().set_bit());
         }
-        error
     }
+    error
 }
