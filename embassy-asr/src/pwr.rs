@@ -16,8 +16,6 @@ use embassy_hal_internal::interrupt::InterruptExt;
 use crate::pac::{self, Interrupt};
 use crate::{Peri, interrupt, peripherals};
 
-const CR1_DEEP_SLEEP_ENABLE: u32 = 1 << 4;
-
 const FLASH_INFO_TRIM: *const u32 = 0x1000_2010 as *const u32;
 const FLASH_PROTECT_SEQUENCE_0: u32 = 0x8c9d_aebf;
 const FLASH_PROTECT_SEQUENCE_1: u32 = 0x1314_1516;
@@ -152,6 +150,9 @@ impl<'d> Pwr<'d> {
             let rcc = unsafe { pac::Rcc::steal() };
             rcc.cgr0().modify(|_, w| w.pwr_clk_en().set_bit());
         });
+        // PWR reaches the shared analog window for low-power-run and XO32K
+        // control, so make sure its clock is gated on before first use.
+        crate::afec::analog::enable_clock();
 
         Interrupt::PWR.disable();
         Interrupt::PWR.unpend();
@@ -368,10 +369,9 @@ impl<'d> Pwr<'d> {
     unsafe fn prepare_deep_sleep(&mut self, mode: DeepSleepMode, wait: WaitKind) {
         let pwr = regs();
 
-        // CR1 bit 4 (deep-sleep enable) has no PAC accessor; set it raw,
-        // then program the trim field through its accessor.
-        pwr.cr1()
-            .modify(|r, w| unsafe { w.bits(r.bits() | CR1_DEEP_SLEEP_ENABLE) });
+        // Vendor `system_cm4.c` raises the regulator trim only for the chip
+        // variant whose flash info tag is zero. CR1 has no deep-sleep enable
+        // bit; Standby is selected through CR0/CR1 below.
         if core::ptr::read_volatile(FLASH_INFO_TRIM) & 0x03 == 0 {
             unsafe {
                 pwr.cr1().modify(|_, w| w.trim().bits(1));
@@ -383,8 +383,14 @@ impl<'d> Pwr<'d> {
             w
         });
 
-        // `low_power_mode` holds `mode & 0x03` (Standby selects through CR1).
-        let cr0_mode = mode as u8 & 0x03;
+        // The vendor programs STOP3 into CR0 for both Stop3 and Standby, then
+        // selects between them with CR1.LP_MODE_EXT.
+        let cr0_mode = match mode {
+            DeepSleepMode::Stop0 => 0,
+            DeepSleepMode::Stop1 => 1,
+            DeepSleepMode::Stop2 => 2,
+            DeepSleepMode::Stop3 | DeepSleepMode::Standby => 3,
+        };
         if mode.needs_stop3_sequence() {
             disable_flash_prefetch();
             modify_analog(AFEC_STOP3_CONTROL, |value| value | STOP3_ANALOG_ENABLE);
@@ -485,10 +491,12 @@ fn regs() -> pac::Pwr {
 }
 
 fn read_analog(index: usize) -> u32 {
+    crate::afec::analog::enable_clock();
     unsafe { core::ptr::read_volatile((AFEC_BASE + index * 4) as *const u32) }
 }
 
 fn modify_analog(index: usize, f: impl FnOnce(u32) -> u32) {
+    crate::afec::analog::enable_clock();
     critical_section::with(|_| unsafe {
         let register = (AFEC_BASE + index * 4) as *mut u32;
         let value = core::ptr::read_volatile(register);
